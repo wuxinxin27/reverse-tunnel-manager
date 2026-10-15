@@ -114,6 +114,26 @@ def _notify_tray_hint():
         pass
 
 
+def _tray_icon_file() -> str:
+    """给 AppIndicator 使用的图标路径：优先复制到纯 ASCII 的运行时目录。
+    （部分扩展对含中文等非 ASCII 字符的路径加载失败，会显示成占位符）"""
+    src = ICON.parent / "icon.png"
+    if not src.exists():
+        src = ICON
+    try:
+        import gi
+        from gi.repository import GLib
+        runtime = GLib.get_user_runtime_dir()  # 如 /run/user/1000，纯 ASCII
+        if runtime:
+            dst = Path(runtime) / "reverse-tunnel-manager-tray.png"
+            if not dst.exists():
+                shutil.copyfile(src, dst)
+            return str(dst)
+    except Exception:
+        pass
+    return str(src)
+
+
 def _create_tray_win32(window, manager, quit_cb):
     """Windows 系统托盘（pystray；打包版已内置）。不可用时返回 None。"""
     try:
@@ -223,10 +243,9 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
                   "（可安装 gir1.2-ayatanaappindicator3-0.1 或 gir1.2-appindicator3-0.1 后重启）")
         else:
             try:
-                icon_png = ICON.parent / "icon.png"
                 indicator = AppIndicator.Indicator.new(
                     "reverse-tunnel-manager",
-                    str(icon_png) if icon_png.exists() else "network-vpn",
+                    _tray_icon_file(),
                     AppIndicator.IndicatorCategory.APPLICATION_STATUS,
                 )
                 indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
