@@ -1,0 +1,89 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Ubuntu 安装包
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 计算版本号
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 构建 .deb 和 .tar.gz
+        run: bash packaging/linux/build.sh "${{ steps.ver.outputs.version }}" "https://github.com/${{ github.repository }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+
+  build-windows:
+    name: Windows 安装包
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 PyInstaller
+        run: pip install --no-cache-dir pyinstaller
+
+      - name: 打包单文件 exe
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --noconsole `
+            --name ReverseTunnelManager `
+            --icon assets/icon.ico `
+            --add-data "static;static" `
+            --add-data "assets;assets" `
+            desktop.py
+
+      - name: 安装 Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: 编译安装包
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF -like "refs/tags/*") { $env:GITHUB_REF_NAME.TrimStart("v") } else { "0.0.0-dev" }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" packaging\windows\installer.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/*setup.exe
+
+  release:
+    name: 发布 Release
+    needs: [build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
