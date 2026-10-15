@@ -485,6 +485,7 @@ class TunnelRuntime:
         self.log_path = LOG_DIR / f"{safe_filename(tunnel.get('name', ''))}-{tunnel['id'][:8]}.log"
         self.traffic = 0           # 累计总流量（上下行合计，含历次重连）
         self.rate = 0.0            # 最近一次采样的总速率（字节/秒）
+        self.traffic_history: collections.deque = collections.deque(maxlen=120)  # 每 ~2 秒一个采样点（字节）
         self._io_last: tuple[int, int] | None = None
         self._io_time = 0.0
 
@@ -546,6 +547,7 @@ class TunnelRuntime:
             with self.lock:
                 self.traffic += delta
                 self.rate = delta / dt
+                self.traffic_history.append(delta)
         self._io_last = io
         self._io_time = now
 
@@ -553,6 +555,7 @@ class TunnelRuntime:
         with self.lock:
             self.traffic = 0
             self.rate = 0.0
+            self.traffic_history.clear()
 
     # ---- 进程控制 ----
 
@@ -779,6 +782,7 @@ class TunnelRuntime:
                 "uptime": int(time.time() - self.run_since) if (self.run_since and self.state == "running") else 0,
                 "traffic": self.traffic,
                 "rate": round(self.rate, 1),
+                "history": list(self.traffic_history),
                 "pid": self.proc.pid if self.proc else None,
                 "log_file": str(self.log_path),
             }

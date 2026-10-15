@@ -44,6 +44,28 @@ function fmtBytes(n) {
   return (i === 0 ? Math.round(v) : v.toFixed(1)) + " " + units[i];
 }
 
+/* 流量柱状图：每根柱 = 一次 ~2 秒采样，从右往左滚动 */
+function drawChart(canvas, values) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const barCount = 60;                 // 视窗内 60 根柱（约 2 分钟）
+  const shown = (values || []).slice(-barCount);
+  const max = Math.max(1, ...shown);
+  const bw = w / barCount;
+  // 底基线
+  ctx.fillStyle = "rgba(76, 141, 255, 0.18)";
+  ctx.fillRect(0, h - 6, w, 2);
+  for (let i = 0; i < shown.length; i++) {
+    const v = shown[i];
+    const x = w - (shown.length - i) * bw;
+    const bh = Math.max(v > 0 ? 5 : 1.5, (v / max) * (h - 14));
+    const alpha = 0.4 + 0.6 * (v / max);
+    ctx.fillStyle = `rgba(76, 141, 255, ${alpha.toFixed(2)})`;
+    ctx.fillRect(x + 1.5, h - bh - 6, Math.max(2, bw - 3), bh);
+  }
+}
+
 const STATE_LABEL = { stopped: "已停止", starting: "连接中", running: "运行中", retry: "重连中", error: "错误" };
 
 /* ================= 全局状态 ================= */
@@ -145,7 +167,7 @@ function renderCard(t) {
   tspan.title = "隧道总流量（上下行合计，跨重连累计）；统计基于 ssh 进程 I/O，含少量协议开销";
   traffic.appendChild(tspan);
   const resetT = el("button", "btn tiny", "清零");
-  resetT.title = "清零这条隧道的流量统计";
+  resetT.title = "清零这条隧道的流量统计（含图表）";
   resetT.addEventListener("click", async (ev) => {
     ev.stopPropagation();
     try { await api(`/api/tunnels/${t.id}/traffic_reset`, { method: "POST" }); await loadState(); }
@@ -153,6 +175,20 @@ function renderCard(t) {
   });
   traffic.appendChild(resetT);
   card.appendChild(traffic);
+
+  // 流量柱状图：每根柱 = 一次 ~2 秒采样
+  const hist = Array.isArray(t.history) ? t.history : [];
+  const chart = document.createElement("canvas");
+  chart.className = "traffic-chart";
+  chart.width = 1200;
+  chart.height = 96;
+  card.appendChild(chart);
+  drawChart(chart, hist);
+  const note = el("div", "chart-note");
+  note.appendChild(el("span", null, "← 最近 2 分钟"));
+  const peak = hist.length ? Math.max(...hist) : 0;
+  note.appendChild(el("span", null, `每柱 ≈2 秒 · 峰值 ${fmtBytes(peak)}/s`));
+  card.appendChild(note);
 
   // 详情（错误 / 警告）
   if (t.detail) {
