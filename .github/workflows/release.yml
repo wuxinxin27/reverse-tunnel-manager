@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   build-linux:
     name: Ubuntu 安装包
@@ -44,8 +48,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装 PyInstaller
-        run: pip install --no-cache-dir pyinstaller
+      - name: 安装 PyInstaller 与 pywebview
+        run: pip install --no-cache-dir pyinstaller pywebview
 
       - name: 打包单文件 exe
         shell: pwsh
@@ -55,6 +59,9 @@ jobs:
             --icon assets/icon.ico `
             --add-data "static;static" `
             --add-data "assets;assets" `
+            --collect-all webview `
+            --collect-all clr_loader `
+            --hidden-import clr `
             desktop.py
 
       - name: 安装 Inno Setup
