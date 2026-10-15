@@ -44,21 +44,35 @@ function fmtBytes(n) {
   return (i === 0 ? Math.round(v) : v.toFixed(1)) + " " + units[i];
 }
 
-/* 流量柱状图：每根柱 = 一次 ~2 秒采样，从右往左滚动 */
-function drawChart(canvas, values) {
+/* 流量柱状图：把 2 秒采样聚合为 10 秒/柱，显示最近 10 分钟 */
+const CHART_SAMPLES_PER_BAR = 5;   // 5 × ~2 秒 ≈ 10 秒/柱
+const CHART_BAR_COUNT = 60;        // 60 柱 ≈ 10 分钟
+
+function aggregateBars(values, samplesPerBar, maxBars) {
+  const vals = values || [];
+  const bars = [];
+  for (let end = vals.length; end > 0 && bars.length < maxBars; end -= samplesPerBar) {
+    const start = Math.max(0, end - samplesPerBar);
+    let sum = 0;
+    for (let i = start; i < end; i++) sum += vals[i];
+    bars.push(sum);
+  }
+  bars.reverse();
+  return bars;
+}
+
+function drawChart(canvas, bars) {
   const ctx = canvas.getContext("2d");
   const w = canvas.width, h = canvas.height;
   ctx.clearRect(0, 0, w, h);
-  const barCount = 60;                 // 视窗内 60 根柱（约 2 分钟）
-  const shown = (values || []).slice(-barCount);
-  const max = Math.max(1, ...shown);
-  const bw = w / barCount;
+  const max = Math.max(1, ...bars);
+  const bw = w / CHART_BAR_COUNT;
   // 底基线
   ctx.fillStyle = "rgba(76, 141, 255, 0.18)";
   ctx.fillRect(0, h - 6, w, 2);
-  for (let i = 0; i < shown.length; i++) {
-    const v = shown[i];
-    const x = w - (shown.length - i) * bw;
+  for (let i = 0; i < bars.length; i++) {
+    const v = bars[i];
+    const x = w - (bars.length - i) * bw;
     const bh = Math.max(v > 0 ? 5 : 1.5, (v / max) * (h - 14));
     const alpha = 0.4 + 0.6 * (v / max);
     ctx.fillStyle = `rgba(76, 141, 255, ${alpha.toFixed(2)})`;
@@ -176,18 +190,19 @@ function renderCard(t) {
   traffic.appendChild(resetT);
   card.appendChild(traffic);
 
-  // 流量柱状图：每根柱 = 一次 ~2 秒采样
+  // 流量柱状图：每根柱 = 10 秒聚合，显示最近 10 分钟
   const hist = Array.isArray(t.history) ? t.history : [];
+  const bars = aggregateBars(hist, CHART_SAMPLES_PER_BAR, CHART_BAR_COUNT);
   const chart = document.createElement("canvas");
   chart.className = "traffic-chart";
   chart.width = 1200;
   chart.height = 96;
   card.appendChild(chart);
-  drawChart(chart, hist);
+  drawChart(chart, bars);
   const note = el("div", "chart-note");
-  note.appendChild(el("span", null, "← 最近 2 分钟"));
-  const peak = hist.length ? Math.max(...hist) : 0;
-  note.appendChild(el("span", null, `每柱 ≈2 秒 · 峰值 ${fmtBytes(peak)}/s`));
+  note.appendChild(el("span", null, "← 最近 10 分钟"));
+  const peak = bars.length ? Math.max(...bars) : 0;
+  note.appendChild(el("span", null, `每柱 ≈10 秒 · 峰值 ${fmtBytes(peak / 10)}/s`));
   card.appendChild(note);
 
   // 详情（错误 / 警告）

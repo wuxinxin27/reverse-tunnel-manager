@@ -485,7 +485,7 @@ class TunnelRuntime:
         self.log_path = LOG_DIR / f"{safe_filename(tunnel.get('name', ''))}-{tunnel['id'][:8]}.log"
         self.traffic = 0           # 累计总流量（上下行合计，含历次重连）
         self.rate = 0.0            # 最近一次采样的总速率（字节/秒）
-        self.traffic_history: collections.deque = collections.deque(maxlen=120)  # 每 ~2 秒一个采样点（字节）
+        self.traffic_history: collections.deque = collections.deque(maxlen=320)  # 每 ~2 秒一个采样点（≈10.7 分钟）
         self._io_last: tuple[int, int] | None = None
         self._io_time = 0.0
 
