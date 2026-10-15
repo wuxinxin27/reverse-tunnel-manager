@@ -4,7 +4,7 @@
 > 可视化配置、断线自动重连、独立于终端 / IDE 的 SSH 会话。
 > Ubuntu 22.04+ 与 Windows 10/11 开箱即用，零第三方依赖。
 
-[![Release](https://img.shields.io/github/v/release/__OWNER__/reverse-tunnel-manager?label=release)](https://github.com/__OWNER__/reverse-tunnel-manager/releases)
+[![Release](https://img.shields.io/github/v/release/wuxinxin27/reverse-tunnel-manager?label=release)](https://github.com/wuxinxin27/reverse-tunnel-manager/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%2B%20%7C%20Windows%2010%2B-blue)](#下载安装)
 
@@ -27,7 +27,7 @@
 
 ### Ubuntu 22.04+ / Debian
 
-从 [Releases](https://github.com/__OWNER__/reverse-tunnel-manager/releases) 下载 `.deb` 安装包：
+从 [Releases](https://github.com/wuxinxin27/reverse-tunnel-manager/releases) 下载 `.deb` 安装包：
 
 ```bash
 sudo apt install ./reverse-tunnel-manager_1.0.0_all.deb
@@ -37,7 +37,7 @@ sudo apt install ./reverse-tunnel-manager_1.0.0_all.deb
 
 ### Windows 10/11
 
-从 [Releases](https://github.com/__OWNER__/reverse-tunnel-manager/releases) 下载
+从 [Releases](https://github.com/wuxinxin27/reverse-tunnel-manager/releases) 下载
 `ReverseTunnelManager-1.0.0-setup.exe` 双击安装，可选桌面图标与开机自启。
 界面使用系统自带的 Edge/Chrome 应用窗口（无标签栏、像原生小程序）。
 
@@ -46,7 +46,7 @@ sudo apt install ./reverse-tunnel-manager_1.0.0_all.deb
 ### 源码运行
 
 ```bash
-git clone https://github.com/__OWNER__/reverse-tunnel-manager
+git clone https://github.com/wuxinxin27/reverse-tunnel-manager
 cd reverse-tunnel-manager
 
 python3 desktop.py        # 打开窗口（Linux 原生窗口；Windows Edge/Chrome 应用窗口）
@@ -105,7 +105,7 @@ packaging/windows/        PyInstaller + Inno Setup 打包脚本
 
 ```bash
 # Ubuntu 安装包
-bash packaging/linux/build.sh 1.0.0 https://github.com/__OWNER__/reverse-tunnel-manager
+bash packaging/linux/build.sh 1.0.0 https://github.com/wuxinxin27/reverse-tunnel-manager
 
 # Windows 安装包：见 packaging/windows/README.md
 
