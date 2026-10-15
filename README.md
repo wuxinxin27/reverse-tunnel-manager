@@ -8,9 +8,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%2B%20%7C%20Windows%2010%2B-blue)](#下载安装)
 
-[![主界面](https://cdn.statically.io/gh/wuxinxin27/reverse-tunnel-manager/main/docs/screenshot.png)](https://github.com/wuxinxin27/reverse-tunnel-manager/tree/main/docs)
+[![主界面](https://github.com/wuxinxin27/reverse-tunnel-manager/releases/download/assets/screenshot.png)](https://github.com/wuxinxin27/reverse-tunnel-manager/tree/main/docs)
 
-[![可视化配置](https://cdn.statically.io/gh/wuxinxin27/reverse-tunnel-manager/main/docs/screenshot-editor.png)](https://github.com/wuxinxin27/reverse-tunnel-manager/tree/main/docs)
+[![可视化配置](https://github.com/wuxinxin27/reverse-tunnel-manager/releases/download/assets/screenshot-editor.png)](https://github.com/wuxinxin27/reverse-tunnel-manager/tree/main/docs)
 
 ## 特性
 
