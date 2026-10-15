@@ -69,7 +69,7 @@ Priority: optional
 Architecture: all
 Depends: python3 (>= 3.10), openssh-client | ssh
 Recommends: python3-gi, gir1.2-webkit2-4.0 | gir1.2-webkit2-4.1
-Maintainer: Ruixin Wu <781785786@qq.com>
+Maintainer: wuxinxin27 <wuxinxin27@users.noreply.github.com>
 ${HOMEPAGE:+Homepage: $HOMEPAGE}
 Description: 多服务器 SSH 反向隧道管理器
  可视化配置的多服务器 SSH 反向隧道守护工具：把远端端口映射到本机
