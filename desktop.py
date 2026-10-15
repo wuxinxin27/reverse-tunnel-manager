@@ -87,6 +87,78 @@ def find_browser() -> str | None:
     return None
 
 
+def _load_appindicator():
+    """加载可用的 AppIndicator 模块（优先 Ayatana，兼容旧版 libappindicator3）"""
+    try:
+        import gi
+    except Exception:
+        return None
+    for name in ("AyatanaAppIndicator3", "AppIndicator3"):
+        try:
+            gi.require_version(name, "0.1")
+            return __import__(f"gi.repository.{name}", fromlist=[name])
+        except Exception:
+            continue
+    return None
+
+
+def _notify_tray_hint():
+    """首次最小化到托盘时给一条系统通知"""
+    try:
+        icon_png = ICON.parent / "icon.png"
+        cmd = ["notify-send", "反向隧道管理器",
+               "已最小化到状态栏，隧道继续在后台运行。点击顶部栏图标可重新打开界面。"]
+        cmd += ["-i", str(icon_png) if icon_png.exists() else "network-vpn"]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _create_tray_win32(window, manager, quit_cb):
+    """Windows 系统托盘（pystray；打包版已内置）。不可用时返回 None。"""
+    try:
+        import pystray
+        from PIL import Image
+    except Exception:
+        return None
+    icon_png = ICON.parent / "icon.png"
+    try:
+        image = Image.open(str(icon_png if icon_png.exists() else ICON))
+        image.load()
+    except Exception:
+        return None
+
+    def on_show(icon, item):
+        try:
+            window.show()
+            window.restore()
+        except Exception:
+            pass
+
+    def on_start_all(icon, item):
+        threading.Thread(target=manager.start_all, daemon=True).start()
+
+    def on_stop_all(icon, item):
+        threading.Thread(target=manager.stop_all, daemon=True).start()
+
+    def on_quit(icon, item):
+        quit_cb()
+
+    menu = pystray.Menu(
+        pystray.MenuItem("显示主界面", on_show, default=True),
+        pystray.MenuItem("全部启动", on_start_all),
+        pystray.MenuItem("全部停止", on_stop_all),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("退出（停止全部隧道）", on_quit),
+    )
+    try:
+        icon = pystray.Icon("reverse-tunnel-manager", image, "反向隧道管理器", menu)
+        threading.Thread(target=icon.run, daemon=True).start()
+        return icon
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- Linux：GTK + WebKit2
 
 def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
@@ -108,6 +180,13 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
         print(f"[提示] GTK/WebKit2 不可用（{e}），尝试其他窗口方案。")
         return None
 
+    # Wayland 下 set_wmclass 无效，靠 prgname 设置应用 ID，才能与 .desktop 关联（收藏栏图标/合并）
+    try:
+        GLib.set_prgname("reverse-tunnel-manager")
+        GLib.set_application_name("反向隧道管理器")
+    except Exception:
+        pass
+
     try:
         Gtk.init(None)
     except Exception:
@@ -121,15 +200,64 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
         win.set_wmclass("reverse-tunnel-manager", "reverse-tunnel-manager")
     except Exception:
         pass
-    if ICON.exists():
-        try:
-            win.set_icon_from_file(str(ICON))
-        except Exception:
-            pass
+    icon_png = ICON.parent / "icon.png"
+    for cand in (icon_png, ICON):
+        if cand.exists():
+            try:
+                win.set_icon_from_file(str(cand))
+                break
+            except Exception:
+                continue
 
     view = WebKit2.WebView()
     view.load_uri(url)
     win.add(view)
+
+    # ---- 系统托盘（Ubuntu 顶栏 AppIndicator）----
+    AppIndicator = _load_appindicator() if owns else None
+    indicator = None
+    tray_available = False
+    if owns:
+        if AppIndicator is None:
+            print("[提示] 未检测到 AppIndicator，无法最小化到状态栏"
+                  "（可安装 gir1.2-ayatanaappindicator3-0.1 或 gir1.2-appindicator3-0.1 后重启）")
+        else:
+            try:
+                icon_png = ICON.parent / "icon.png"
+                indicator = AppIndicator.Indicator.new(
+                    "reverse-tunnel-manager",
+                    str(icon_png) if icon_png.exists() else "network-vpn",
+                    AppIndicator.IndicatorCategory.APPLICATION_STATUS,
+                )
+                indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+                indicator.set_title("反向隧道管理器")
+
+                menu = Gtk.Menu()
+
+                def _menu_item(label, cb):
+                    item = Gtk.MenuItem(label=label)
+                    item.connect("activate", lambda *_: cb())
+                    return item
+
+                def _show_window():
+                    win.show_all()
+                    win.present()
+
+                menu.append(_menu_item("显示主界面", _show_window))
+                menu.append(_menu_item("全部启动",
+                                       lambda: threading.Thread(target=manager.start_all, daemon=True).start()))
+                menu.append(_menu_item("全部停止",
+                                       lambda: threading.Thread(target=manager.stop_all, daemon=True).start()))
+                menu.append(Gtk.SeparatorMenuItem())
+                menu.append(_menu_item("退出（停止全部隧道）", lambda: quit_all()))
+                menu.show_all()
+                indicator.set_menu(menu)
+                tray_available = True
+                print("系统托盘已启用")
+            except Exception as e:
+                print(f"[提示] 系统托盘初始化失败（{e}）")
+                indicator = None
+                tray_available = False
 
     def quit_all(*_):
         """停止全部隧道并退出（幂等）"""
@@ -151,6 +279,11 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
                         httpd.shutdown()
                     except Exception:
                         pass
+                    if indicator is not None:
+                        try:
+                            indicator.set_status(AppIndicator.IndicatorStatus.PASSIVE)
+                        except Exception:
+                            pass
                 GLib.idle_add(Gtk.main_quit)
 
         threading.Thread(target=work, daemon=True).start()
@@ -161,6 +294,13 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
             return True
         if not owns:
             return False  # 连的是别的实例：直接关窗口，不退出对方
+        if tray_available:
+            # 最小化到状态栏：隐藏窗口，隧道继续运行
+            win.hide()
+            if not state.get("tray_hint_shown"):
+                state["tray_hint_shown"] = True
+                _notify_tray_hint()
+            return True
         dialog = Gtk.MessageDialog(
             transient_for=win, modal=True,
             message_type=Gtk.MessageType.QUESTION,
@@ -212,19 +352,45 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
             "反向隧道管理器", url, width=1180, height=800, min_size=(760, 520),
         )
         state = {"quitting": False}
+        tray_icon = None
 
         def quit_all(*_):
             if state["quitting"]:
                 return
             state["quitting"] = True
+            if tray_icon is not None:
+                try:
+                    tray_icon.stop()
+                except Exception:
+                    pass
             try:
                 window.destroy()
             except Exception:
                 pass
 
+        if owns:
+            tray_icon = _create_tray_win32(window, manager, lambda: quit_all())
+            if tray_icon is None:
+                print("[提示] 未启用系统托盘（源码运行可 pip install pystray pillow 后重启）")
+
         def on_closing():
             if state["quitting"] or not owns:
                 return True
+            if tray_icon is not None:
+                # 最小化到托盘：隐藏窗口，隧道继续运行
+                try:
+                    window.hide()
+                    if not state.get("tray_hint_shown"):
+                        state["tray_hint_shown"] = True
+                        try:
+                            tray_icon.notify(
+                                "已最小化到状态栏，隧道继续在后台运行。点击托盘图标可重新打开。",
+                                "反向隧道管理器")
+                        except Exception:
+                            pass
+                except Exception:
+                    return True
+                return False  # 取消关闭，隐藏到托盘
             try:
                 return bool(window.create_confirmation_dialog(
                     "反向隧道管理器", "关闭窗口将停止全部隧道并退出工具。\n确定要退出吗？"))
@@ -238,6 +404,11 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
 
         webview.start()  # 阻塞直到窗口关闭（主线程）
 
+        if tray_icon is not None:
+            try:
+                tray_icon.stop()
+            except Exception:
+                pass
         if owns:
             manager.stop_all()
             try:

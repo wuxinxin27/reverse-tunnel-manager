@@ -36,6 +36,14 @@ function fmtUptime(sec) {
   return `${s} 秒`;
 }
 
+function fmtBytes(n) {
+  if (n === null || n === undefined || isNaN(n)) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = Number(n), i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? Math.round(v) : v.toFixed(1)) + " " + units[i];
+}
+
 const STATE_LABEL = { stopped: "已停止", starting: "连接中", running: "运行中", retry: "重连中", error: "错误" };
 
 /* ================= 全局状态 ================= */
@@ -130,6 +138,21 @@ function renderCard(t) {
   if (t.retries) meta.appendChild(el("span", null, "重试 " + t.retries + " 次"));
   if (!t.auto_reconnect) meta.appendChild(el("span", null, "未启用自动重连"));
   card.appendChild(meta);
+
+  // 流量统计
+  const traffic = el("div", "card-traffic");
+  const tspan = el("span", null, `⇅ ${fmtBytes(t.traffic)}（${fmtBytes(t.rate)}/s）`);
+  tspan.title = "隧道总流量（上下行合计，跨重连累计）；统计基于 ssh 进程 I/O，含少量协议开销";
+  traffic.appendChild(tspan);
+  const resetT = el("button", "btn tiny", "清零");
+  resetT.title = "清零这条隧道的流量统计";
+  resetT.addEventListener("click", async (ev) => {
+    ev.stopPropagation();
+    try { await api(`/api/tunnels/${t.id}/traffic_reset`, { method: "POST" }); await loadState(); }
+    catch (e) { toast(e.message, "error"); }
+  });
+  traffic.appendChild(resetT);
+  card.appendChild(traffic);
 
   // 详情（错误 / 警告）
   if (t.detail) {

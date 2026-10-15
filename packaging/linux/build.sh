@@ -68,7 +68,7 @@ Section: net
 Priority: optional
 Architecture: all
 Depends: python3 (>= 3.10), openssh-client | ssh
-Recommends: python3-gi, gir1.2-webkit2-4.0 | gir1.2-webkit2-4.1
+Recommends: python3-gi, gir1.2-webkit2-4.0 | gir1.2-webkit2-4.1, gir1.2-ayatanaappindicator3-0.1 | gir1.2-appindicator3-0.1
 Maintainer: wuxinxin27 <wuxinxin27@users.noreply.github.com>
 ${HOMEPAGE:+Homepage: $HOMEPAGE}
 Description: 多服务器 SSH 反向隧道管理器

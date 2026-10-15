@@ -47,7 +47,7 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 ICON_FILE = APP_DIR / "assets" / "icon.svg"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 
 def _base_dir(kind: str) -> Path:
@@ -127,6 +127,48 @@ def analyze_ssh_line(line: str):
         if m:
             return handler(m), fatal
     return None
+
+
+def read_process_io(pid: int) -> tuple[int, int] | None:
+    """读取进程累计 I/O 计数，返回 (接收字节, 发送字节)；失败返回 None。
+    Linux: /proc/<pid>/io 的 rchar/wchar；Windows: GetProcessIoCounters。
+    对 ssh 进程来说，这基本就是该隧道的上下行流量。"""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class IO_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("ReadOperationCount", ctypes.c_ulonglong),
+                    ("WriteOperationCount", ctypes.c_ulonglong),
+                    ("OtherOperationCount", ctypes.c_ulonglong),
+                    ("ReadTransferCount", ctypes.c_ulonglong),
+                    ("WriteTransferCount", ctypes.c_ulonglong),
+                    ("OtherTransferCount", ctypes.c_ulonglong),
+                ]
+
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return None
+            try:
+                counters = IO_COUNTERS()
+                if not k32.GetProcessIoCounters(h, ctypes.byref(counters)):
+                    return None
+                return int(counters.ReadTransferCount), int(counters.WriteTransferCount)
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            return None
+    try:
+        vals: dict[str, int] = {}
+        with open(f"/proc/{pid}/io", "r", encoding="ascii") as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                vals[key.strip()] = int(value.strip() or 0)
+        return vals.get("rchar", 0), vals.get("wchar", 0)
+    except (OSError, ValueError):
+        return None
 
 
 def now_str() -> str:
@@ -441,6 +483,10 @@ class TunnelRuntime:
         self.log_lines: collections.deque = collections.deque(maxlen=2000)
         self.log_total = 0
         self.log_path = LOG_DIR / f"{safe_filename(tunnel.get('name', ''))}-{tunnel['id'][:8]}.log"
+        self.traffic = 0           # 累计总流量（上下行合计，含历次重连）
+        self.rate = 0.0            # 最近一次采样的总速率（字节/秒）
+        self._io_last: tuple[int, int] | None = None
+        self._io_time = 0.0
 
     # ---- 状态与日志 ----
 
@@ -480,6 +526,33 @@ class TunnelRuntime:
             since = max(since, base)
             lines = list(self.log_lines)[since - base:]
             return lines, self.log_total
+
+    # ---- 流量统计 ----
+
+    def _sample_traffic(self, proc) -> None:
+        now = time.time()
+        io = read_process_io(proc.pid)
+        if io is None:
+            self._io_last = None
+            self._io_time = now
+            return
+        if self._io_last is not None:
+            dt = max(0.5, now - self._io_time)
+            drx = max(0, io[0] - self._io_last[0])
+            dtx = max(0, io[1] - self._io_last[1])
+            # ssh 是转发进程：每个字节都会被“读一次、写一次”，
+            # 因此 (rchar + wchar) / 2 ≈ 该隧道的双向总流量
+            delta = (drx + dtx) // 2
+            with self.lock:
+                self.traffic += delta
+                self.rate = delta / dt
+        self._io_last = io
+        self._io_time = now
+
+    def reset_traffic(self) -> None:
+        with self.lock:
+            self.traffic = 0
+            self.rate = 0.0
 
     # ---- 进程控制 ----
 
@@ -627,7 +700,11 @@ class TunnelRuntime:
                     if not announced and time.time() - t0 >= self.START_GRACE:
                         announced = True
                         self._set(state="running", detail=self.warning, run_since=time.time(), retries=0)
+                        self._io_last = read_process_io(proc.pid)
+                        self._io_time = time.time()
                         self._log("===== 隧道已建立 =====")
+                    if announced and time.time() - self._io_time >= 2.0:
+                        self._sample_traffic(proc)
                     continue
                 line = line.rstrip("\r\n")
                 if line:
@@ -636,6 +713,7 @@ class TunnelRuntime:
 
             code = proc.poll()
             self._terminate_proc()
+            self._set(rate=0.0)
 
             # 排空剩余输出，抓到最后的报错
             time.sleep(0.15)
@@ -699,6 +777,8 @@ class TunnelRuntime:
                 "warning": self.warning,
                 "retries": self.retries,
                 "uptime": int(time.time() - self.run_since) if (self.run_since and self.state == "running") else 0,
+                "traffic": self.traffic,
+                "rate": round(self.rate, 1),
                 "pid": self.proc.pid if self.proc else None,
                 "log_file": str(self.log_path),
             }
@@ -818,6 +898,9 @@ class Manager:
         rt = self._find(tid)
         rt.stop()
         return rt.snapshot()
+
+    def reset_traffic(self, tid: str) -> None:
+        self._find(tid).reset_traffic()
 
     def restart(self, tid: str) -> dict:
         rt = self._find(tid)
@@ -1074,7 +1157,7 @@ class Handler(BaseHTTPRequestHandler):
                     threading.Timer(0.3, self.shutdown_cb).start()
                 return self._json({"ok": True})
 
-            m = re.fullmatch(r"/api/tunnels/([0-9a-f]+)/(start|stop|restart|duplicate)", path)
+            m = re.fullmatch(r"/api/tunnels/([0-9a-f]+)/(start|stop|restart|duplicate|traffic_reset)", path)
             if m:
                 tid, action = m.group(1), m.group(2)
                 if action == "start":
@@ -1085,6 +1168,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(self.manager.restart(tid))
                 if action == "duplicate":
                     return self._json(self.manager.duplicate(tid), 201)
+                if action == "traffic_reset":
+                    self.manager.reset_traffic(tid)
+                    return self._json({"ok": True})
             return self._error("未知路径", 404)
         except KeyError:
             return self._error("隧道不存在", 404)

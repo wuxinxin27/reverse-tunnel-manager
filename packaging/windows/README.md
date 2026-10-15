@@ -12,7 +12,7 @@ windows-latest 上自动完成：
 ## 本地构建
 
 ```powershell
-pip install pyinstaller pywebview
+pip install pyinstaller pywebview pystray pillow
 
 pyinstaller --noconfirm --clean --onefile --noconsole `
   --name ReverseTunnelManager `
@@ -22,6 +22,7 @@ pyinstaller --noconfirm --clean --onefile --noconsole `
   --collect-all webview `
   --collect-all clr_loader `
   --hidden-import clr `
+  --hidden-import pystray._win32 `
   desktop.py
 ```
 
@@ -41,4 +42,5 @@ pyinstaller --noconfirm --clean --onefile --noconsole `
 - 程序依赖系统自带的 `ssh.exe`（Windows 10 1809+ 默认包含 OpenSSH 客户端）。
 - 界面为独立的 WebView2 原生窗口（使用系统自带的 Edge 运行时），不是浏览器标签页；
   系统缺少 WebView2 时自动退回 Edge/Chrome 应用窗口，再退回默认浏览器。
+- 关闭窗口自动最小化到系统托盘（任务栏右下角，内置 pystray），隧道继续后台运行。
 - 数据目录：配置在 `%APPDATA%\ReverseTunnelManager\`，日志在 `%LOCALAPPDATA%\ReverseTunnelManager\logs\`。

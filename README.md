@@ -8,13 +8,15 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%2B%20%7C%20Windows%2010%2B-blue)](#下载安装)
 
-![主界面](docs/screenshot.png)
+![主界面](https://raw.githubusercontent.com/wuxinxin27/reverse-tunnel-manager/main/docs/screenshot.png)
 
-![可视化配置](docs/screenshot-editor.png)
+![可视化配置](https://raw.githubusercontent.com/wuxinxin27/reverse-tunnel-manager/main/docs/screenshot-editor.png)
 
 ## 特性
 
 - 🖥 **可视化配置**：独立原生窗口（Linux GTK/WebKit2、Windows WebView2），增删改查、启停隧道、查看实时日志
+- 📌 **最小化到状态栏**：关闭窗口自动隐藏到系统托盘（Ubuntu 顶栏 / Windows 任务栏），隧道继续在后台运行；托盘菜单可显示界面 / 全部启停 / 退出
+- 📊 **流量统计**：每条隧道实时上下行速率 + 累计流量（跨重连保持），可一键清零
 - 🔁 **断线自动重连**：每条隧道独立进程守护，重连间隔可调
 - 🧩 **多服务器 × 多端口**：同一本机端口（如 7890）可同时反向穿透给任意多台服务器
 - 🔒 **独立于 SSH 通道**：与 VS Code / 终端里的 SSH 会话互不影响，关掉 IDE 隧道照常工作
@@ -86,6 +88,8 @@ Windows 源码运行原生窗口需 `pip install pywebview`；以上缺失时会
 | 认证失败 | 检查用户名/私钥；云平台通常需要先在平台上导入你的公钥 |
 | Windows 找不到 ssh | 「设置 → 应用 → 可选功能」安装 OpenSSH 客户端 |
 | Windows 界面变成浏览器窗口 | 系统缺少 WebView2/Edge 运行时；安装 Edge 即可恢复原生窗口（功能不受影响） |
+| 关闭窗口后程序「不见了」 | Linux 上已最小化到顶栏状态栏（托盘），隧道继续运行；点顶栏图标重新打开，彻底退出用托盘菜单「退出」 |
+| 顶栏没有托盘图标 | 缺少 AppIndicator 组件：`sudo apt install gir1.2-ayatanaappindicator3-0.1` 后重启工具 |
 | 编辑后不生效 | 运行中的隧道需要点「⟳ 重启」 |
 | 端口 8787 被占用 | 在设置里改「Web 界面端口」后重启工具 |
 
