@@ -14,16 +14,20 @@
 
 ## 特性
 
-- 🖥 **可视化配置**：独立原生窗口（Linux GTK/WebKit2、Windows WebView2），增删改查、启停隧道、查看实时日志
-- 📌 **最小化到状态栏**：关闭窗口自动隐藏到系统托盘（Ubuntu 顶栏 / Windows 任务栏），隧道继续在后台运行；托盘菜单可显示界面 / 全部启停 / 退出
-- 📊 **流量统计**：每条隧道实时上下行速率 + 累计流量（跨重连保持），可一键清零
-- 🔁 **断线自动重连**：每条隧道独立进程守护，重连间隔可调
+- 🖥 **可视化配置**：独立原生窗口（Linux GTK/WebKit2、Windows WebView2、macOS WKWebView），增删改查、启停隧道、查看实时日志
+- 📌 **最小化到状态栏**：关闭窗口自动隐藏到系统托盘（Ubuntu 顶栏 / Windows 任务栏），托盘菜单直接列出并启停每条隧道，悬浮显示总速率
+- 📊 **流量统计**：实时速率 + 今日 / 累计流量（持久化，重启不丢），附最近 10 分钟柱状图（悬停查看数值），一键清零
+- ❤️ **代理健康检查**：定期探测本机代理端口（如 7890）；Clash 没开时卡片直接警示，恢复后自动提示
+- 🔁 **智能重连**：指数退避（最长 60 秒）+ 网络恢复立即重连，服务器抖动不再干等
+- 🔔 **系统通知**：断线 / 重连 / 远端端口被占时发送系统通知（Linux / Windows / macOS）
+- 🌗 **主题与语言**：跟随系统深浅色；界面中英双语
+- ⬆️ **自动更新检查**：启动时检查 GitHub 新版本，一键前往下载
 - 🧩 **多服务器 × 多端口**：同一本机端口（如 7890）可同时反向穿透给任意多台服务器
 - 🔒 **独立于 SSH 通道**：与 VS Code / 终端里的 SSH 会话互不影响，关掉 IDE 隧道照常工作
 - 🧪 **连接测试**：内置测试功能，检查认证、网络以及远端端口是否被占用
 - 🪄 **聪明的小细节**：粘贴平台给的 `ssh` 命令自动解析；支持 `~/.ssh/config` 别名（自动忽略别名自带的 RemoteForward，避免重复绑定）
 - 📄 日志落盘、配置导入导出、开机自启（可选）
-- 📦 **核心零第三方依赖**：Python 标准库 + 系统 `ssh`；提供 .deb / Windows 安装包（Windows 原生窗口基于系统 WebView2）
+- 📦 **核心零第三方依赖**：Python 标准库 + 系统 `ssh`；提供 .deb / Windows 安装包 / macOS .dmg
 
 ## 下载安装
 
@@ -37,6 +41,8 @@ sudo apt install ./reverse-tunnel-manager_1.0.0_all.deb
 
 然后在应用菜单里打开「反向隧道管理器」。（也提供免安装的 `.tar.gz`）
 
+> `.deb` 为 `Architecture: all`（纯 Python），**x86_64 与 ARM64（树莓派/Jetson 等）通用**。
+
 ### Windows 10/11
 
 从 [Releases](https://github.com/wuxinxin27/reverse-tunnel-manager/releases) 下载
@@ -44,6 +50,14 @@ sudo apt install ./reverse-tunnel-manager_1.0.0_all.deb
 界面是独立原生窗口（使用系统自带的 WebView2/Edge 运行时）；若系统缺少 WebView2（极少见），会自动退化为 Edge/Chrome 应用窗口。
 
 > 需要 `ssh.exe`：Windows 10 1809+ 默认包含；如缺失，在「设置 → 应用 → 可选功能」安装 OpenSSH 客户端。
+
+### macOS（Apple Silicon）
+
+从 [Releases](https://github.com/wuxinxin27/reverse-tunnel-manager/releases) 下载
+`ReverseTunnelManager-x.y.z-macOS.dmg`，打开后把 App 拖入「应用程序」。
+首次打开若提示未验证开发者：右键 App → 打开（或「系统设置 → 隐私与安全性 → 仍要打开」）。
+
+> macOS 版暂不支持系统托盘（受平台限制）：关闭窗口会先弹出确认框再退出；后台运行可用 `--background` 参数。
 
 ### 源码运行
 
@@ -90,6 +104,8 @@ Windows 源码运行原生窗口需 `pip install pywebview`；以上缺失时会
 | Windows 界面变成浏览器窗口 | 系统缺少 WebView2/Edge 运行时；安装 Edge 即可恢复原生窗口（功能不受影响） |
 | 关闭窗口后程序「不见了」 | Linux 上已最小化到顶栏状态栏（托盘），隧道继续运行；点顶栏图标重新打开，彻底退出用托盘菜单「退出」 |
 | 顶栏没有托盘图标 | 缺少 AppIndicator 组件：`sudo apt install gir1.2-ayatanaappindicator3-0.1` 后重启工具 |
+| 不弹系统通知 | Linux 需安装 `libnotify-bin`（`sudo apt install libnotify-bin`）；macOS 首次需在系统设置中允许本 App 通知 |
+| 检查更新失败 | 网络原因（GitHub API 不可达），不影响使用，可忽略 |
 | 编辑后不生效 | 运行中的隧道需要点「⟳ 重启」 |
 | 端口 8787 被占用 | 在设置里改「Web 界面端口」后重启工具 |
 

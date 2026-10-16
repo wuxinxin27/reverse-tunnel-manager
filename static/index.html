@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>反向隧道管理器</title>
+<title data-i18n="app.title">反向隧道管理器</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -12,15 +12,16 @@
   <div class="brand">
     <span class="logo">⇄</span>
     <div>
-      <h1>反向隧道管理器</h1>
-      <div class="sub" id="summary">加载中…</div>
+      <h1 data-i18n="app.title">反向隧道管理器</h1>
+      <div class="sub" id="summary"></div>
     </div>
   </div>
   <div class="head-actions">
-    <button id="btn-start-all" class="btn">全部启动</button>
-    <button id="btn-stop-all" class="btn">全部停止</button>
-    <button id="btn-new" class="btn primary">＋ 新建隧道</button>
-    <button id="btn-settings" class="btn icon" title="设置">⚙</button>
+    <a id="update-banner" class="update-banner hidden" target="_blank" rel="noopener noreferrer"></a>
+    <button id="btn-start-all" class="btn" data-i18n="btn.start_all">全部启动</button>
+    <button id="btn-stop-all" class="btn" data-i18n="btn.stop_all">全部停止</button>
+    <button id="btn-new" class="btn primary" data-i18n="btn.new">＋ 新建隧道</button>
+    <button id="btn-settings" class="btn icon" data-i18n-title="btn.settings" title="设置">⚙</button>
   </div>
 </header>
 
@@ -29,10 +30,10 @@
 
   <aside id="logpane">
     <div class="log-head">
-      <span id="log-title">日志</span>
+      <span id="log-title" data-i18n="log.title">日志</span>
       <span class="spacer"></span>
-      <label class="check"><input type="checkbox" id="log-autoscroll" checked>自动滚动</label>
-      <button id="btn-clear-log" class="btn tiny">清空视图</button>
+      <label class="check"><input type="checkbox" id="log-autoscroll" checked><span data-i18n="log.autoscroll">自动滚动</span></label>
+      <button id="btn-clear-log" class="btn tiny" data-i18n="log.clear">清空视图</button>
     </div>
     <pre id="logview"></pre>
   </aside>
@@ -41,95 +42,95 @@
 <!-- 编辑器 -->
 <div id="editor" class="modal hidden">
   <div class="dialog">
-    <h2 id="editor-title">新建隧道</h2>
+    <h2 id="editor-title" data-i18n="editor.title_new">新建隧道</h2>
 
     <div class="grid2">
-      <label>名称
-        <input id="f-name" placeholder="例如：sensecore-A100">
+      <label><span data-i18n="editor.name">名称</span>
+        <input id="f-name" data-i18n-ph="editor.name_ph" placeholder="例如：sensecore-A100">
       </label>
-      <label>备注（可选）
-        <input id="f-note" placeholder="例如：GPU 训练机">
+      <label><span data-i18n="editor.note">备注（可选）</span>
+        <input id="f-note" data-i18n-ph="editor.note_ph" placeholder="例如：GPU 训练机">
       </label>
     </div>
 
     <fieldset>
-      <legend>连接方式</legend>
+      <legend data-i18n="editor.connect">连接方式</legend>
       <div class="radio-row">
-        <label class="check"><input type="radio" name="mode" value="custom"> 自定义主机</label>
-        <label class="check"><input type="radio" name="mode" value="alias"> 使用 ~/.ssh/config 别名</label>
+        <label class="check"><input type="radio" name="mode" value="custom"> <span data-i18n="editor.mode_custom">自定义主机</span></label>
+        <label class="check"><input type="radio" name="mode" value="alias"> <span data-i18n="editor.mode_alias">使用 ~/.ssh/config 别名</span></label>
       </div>
 
       <div id="pane-custom" class="pane">
         <div class="grid3">
-          <label>服务器地址（host 或 IP）
-            <input id="f-host" placeholder="例如：192.168.1.100">
+          <label><span data-i18n="editor.host">服务器地址（host 或 IP）</span>
+            <input id="f-host" data-i18n-ph="editor.host_ph" placeholder="例如：192.168.1.100">
           </label>
-          <label>SSH 端口
+          <label><span data-i18n="editor.ssh_port">SSH 端口</span>
             <input id="f-port" type="number" min="1" max="65535" value="22">
           </label>
-          <label>用户名
-            <input id="f-user" placeholder="例如：root">
+          <label><span data-i18n="editor.user">用户名</span>
+            <input id="f-user" data-i18n-ph="editor.user_ph" placeholder="例如：root">
           </label>
         </div>
         <div class="grid2">
-          <label>私钥文件（可留空，使用默认 ~/.ssh/ 下的密钥）
-            <input id="f-identity" placeholder="例如：~/.ssh/id_rsa">
+          <label><span data-i18n="editor.identity">私钥文件（可留空，使用默认 ~/.ssh/ 下的密钥）</span>
+            <input id="f-identity" data-i18n-ph="editor.identity_ph" placeholder="例如：~/.ssh/id_rsa">
           </label>
-          <label>主机密钥检查
+          <label><span data-i18n="editor.hostkey">主机密钥检查</span>
             <select id="f-hostkey">
-              <option value="accept-new">accept-new（首次自动记录到工具专用 known_hosts，推荐）</option>
-              <option value="no">no（不检查，适合主机密钥会变化的临时平台）</option>
-              <option value="yes">yes（严格校验）</option>
+              <option value="accept-new" data-i18n="editor.hostkey_accept">accept-new（首次自动记录到工具专用 known_hosts，推荐）</option>
+              <option value="no" data-i18n="editor.hostkey_no">no（不检查，适合主机密钥会变化的临时平台）</option>
+              <option value="yes" data-i18n="editor.hostkey_yes">yes（严格校验）</option>
             </select>
           </label>
         </div>
         <div class="ssh-parse">
-          <label>从 SSH 命令解析（粘贴平台给的 ssh 命令）
-            <textarea id="f-sshcmd" rows="2" placeholder="例如：ssh -p 2222 user@198.51.100.10"></textarea>
+          <label><span data-i18n="editor.parse">从 SSH 命令解析（粘贴平台给的 ssh 命令）</span>
+            <textarea id="f-sshcmd" rows="2" data-i18n-ph="editor.parse_ph" placeholder="例如：ssh -p 2222 user@198.51.100.10"></textarea>
           </label>
-          <button class="btn" id="btn-parse">解析并填充</button>
+          <button class="btn" id="btn-parse" data-i18n="editor.parse_btn">解析并填充</button>
         </div>
       </div>
 
       <div id="pane-alias" class="pane hidden">
         <div class="grid2">
-          <label>主机别名
+          <label><span data-i18n="editor.alias">主机别名</span>
             <div class="row">
               <select id="f-alias"></select>
-              <button class="btn tiny" id="btn-refresh-aliases">刷新</button>
+              <button class="btn tiny" id="btn-refresh-aliases" data-i18n="editor.alias_refresh">刷新</button>
             </div>
           </label>
         </div>
-        <p class="hint">别名中若自带 RemoteForward 转发，本工具会自动忽略它，只用下面配置的规则。</p>
+        <p class="hint" data-i18n="editor.alias_hint">别名中若自带 RemoteForward 转发，本工具会自动忽略它，只用下面配置的规则。</p>
       </div>
     </fieldset>
 
     <fieldset>
-      <legend>转发规则（远端端口 → 本机目标）</legend>
+      <legend data-i18n="editor.rules">转发规则（远端端口 → 本机目标）</legend>
       <div id="rules"></div>
-      <button class="btn tiny" id="btn-add-rule">＋ 添加规则</button>
-      <p class="hint">远端访问 <code>127.0.0.1:远端端口</code> 时，会经由隧道连到“本机目标”。远端绑定地址一般留空即可（默认只绑回环地址）。</p>
+      <button class="btn tiny" id="btn-add-rule" data-i18n="editor.add_rule">＋ 添加规则</button>
+      <p class="hint" data-i18n="editor.rules_hint">远端访问 127.0.0.1:远端端口 时，会经由隧道连到“本机目标”。远端绑定地址一般留空即可。</p>
     </fieldset>
 
     <fieldset>
-      <legend>高级</legend>
-      <label>额外 ssh 参数（可选，直接追加到命令行）
-        <input id="f-extra" placeholder="例如：-o Compression=yes">
+      <legend data-i18n="editor.advanced">高级</legend>
+      <label><span data-i18n="editor.extra_args">额外 ssh 参数（可选，直接追加到命令行）</span>
+        <input id="f-extra" data-i18n-ph="editor.extra_args_ph" placeholder="例如：-o Compression=yes">
       </label>
       <div class="radio-row">
-        <label class="check"><input type="checkbox" id="f-auto-reconnect" checked> 断线自动重连</label>
-        <label class="check"><input type="checkbox" id="f-enabled" checked> 工具启动时自动启动</label>
+        <label class="check"><input type="checkbox" id="f-auto-reconnect" checked> <span data-i18n="editor.auto_reconnect">断线自动重连</span></label>
+        <label class="check"><input type="checkbox" id="f-enabled" checked> <span data-i18n="editor.auto_start">工具启动时自动启动</span></label>
       </div>
     </fieldset>
 
     <div class="test-row">
-      <button class="btn" id="btn-test">测试连接</button>
+      <button class="btn" id="btn-test" data-i18n="editor.test">测试连接</button>
       <pre id="test-output" class="hidden"></pre>
     </div>
 
     <div class="dialog-actions">
-      <button class="btn" id="btn-cancel">取消</button>
-      <button class="btn primary" id="btn-save">保存</button>
+      <button class="btn" id="btn-cancel" data-i18n="btn.cancel">取消</button>
+      <button class="btn primary" id="btn-save" data-i18n="btn.save">保存</button>
     </div>
   </div>
 </div>
@@ -137,40 +138,62 @@
 <!-- 设置 -->
 <div id="settings" class="modal hidden">
   <div class="dialog narrow">
-    <h2>设置</h2>
+    <h2 data-i18n="settings.title">设置</h2>
     <div class="grid2">
-      <label>重连间隔（秒）
+      <label><span data-i18n="settings.retry">重连间隔（秒）</span>
         <input id="s-retry" type="number" min="1" max="3600" value="5">
       </label>
-      <label>Web 界面端口（重启工具后生效）
+      <label><span data-i18n="settings.ui_port">Web 界面端口（重启工具后生效）</span>
         <input id="s-port" type="number" min="1" max="65535" value="8787">
       </label>
     </div>
-    <label>额外 ssh 参数（追加到所有隧道命令）
-      <input id="s-extra" placeholder="例如：-o IdentitiesOnly=yes">
+    <div class="grid2">
+      <label><span data-i18n="settings.theme">主题</span>
+        <select id="s-theme">
+          <option value="auto" data-i18n="settings.theme_auto">跟随系统</option>
+          <option value="dark" data-i18n="settings.theme_dark">深色</option>
+          <option value="light" data-i18n="settings.theme_light">浅色</option>
+        </select>
+      </label>
+      <label><span data-i18n="settings.language">语言</span>
+        <select id="s-language">
+          <option value="auto" data-i18n="settings.lang_auto">跟随系统</option>
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </label>
+    </div>
+    <label><span data-i18n="settings.extra_args">额外 ssh 参数（追加到所有隧道命令）</span>
+      <input id="s-extra" data-i18n-ph="settings.extra_args_ph" placeholder="例如：-o IdentitiesOnly=yes">
     </label>
     <div class="radio-row">
-      <label class="check"><input type="checkbox" id="s-auto-start"> 启动工具时自动启动已勾选“随工具启动”的隧道</label>
-      <label class="check"><input type="checkbox" id="s-autostart"> 开机自动运行本工具</label>
+      <label class="check"><input type="checkbox" id="s-auto-start"> <span data-i18n="settings.auto_start">启动工具时自动启动已勾选“随工具启动”的隧道</span></label>
+      <label class="check"><input type="checkbox" id="s-autostart"> <span data-i18n="settings.autostart">开机自动运行本工具</span></label>
+    </div>
+    <div class="radio-row">
+      <label class="check"><input type="checkbox" id="s-notify"> <span data-i18n="settings.notify">断线 / 重连等事件发送系统通知</span></label>
+      <label class="check"><input type="checkbox" id="s-proxy-check"> <span data-i18n="settings.proxy_check">定期检查本机代理端口是否在监听</span></label>
+      <label class="check"><input type="checkbox" id="s-update-check"> <span data-i18n="settings.update_check">启动时自动检查新版本</span></label>
     </div>
     <hr>
     <div class="settings-tools">
-      <button class="btn" id="btn-export">导出配置</button>
-      <button class="btn" id="btn-import">导入配置</button>
+      <button class="btn" id="btn-export" data-i18n="settings.export">导出配置</button>
+      <button class="btn" id="btn-import" data-i18n="settings.import">导入配置</button>
       <input type="file" id="import-file" accept=".json,application/json" class="hidden">
-      <button class="btn danger" id="btn-quit">停止全部并退出工具</button>
+      <button class="btn" id="btn-check-update" data-i18n="settings.check_update">检查更新</button>
+      <button class="btn danger" id="btn-quit" data-i18n="settings.quit">停止全部并退出工具</button>
       <span class="spacer"></span>
       <span id="about" class="hint"></span>
     </div>
     <div class="dialog-actions">
-      <button class="btn" id="btn-settings-close">关闭</button>
-      <button class="btn primary" id="btn-settings-save">保存设置</button>
+      <button class="btn" id="btn-settings-close" data-i18n="btn.close">关闭</button>
+      <button class="btn primary" id="btn-settings-save" data-i18n="settings.save">保存设置</button>
     </div>
   </div>
 </div>
 
 <div id="toasts"></div>
-<div id="offline" class="hidden">与工具后端失去连接 —— 如果工具已退出，请重新运行 <code>app.py</code></div>
+<div id="offline" class="hidden" data-i18n="offline">与工具后端失去连接 —— 如果工具已退出，请重新运行 app.py</div>
 
 <script src="/static/app.js"></script>
 </body>

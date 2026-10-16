@@ -29,10 +29,12 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 import webbrowser
 from datetime import datetime
@@ -47,7 +49,7 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 ICON_FILE = APP_DIR / "assets" / "icon.svg"
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 
 
 def _base_dir(kind: str) -> Path:
@@ -78,10 +80,15 @@ LOG_DIR = DATA_DIR / "logs"
 NO_SSH_CONFIG = DATA_DIR / "empty_ssh_config"
 
 DEFAULT_SETTINGS = {
-    "retry_seconds": 5,      # 断线后重连间隔
+    "retry_seconds": 5,      # 断线后重连间隔（智能重连的基准值，失败后指数退避）
     "auto_start": True,      # 工具启动时，自动启动勾选了“随工具启动”的隧道
     "ui_port": 8787,         # 本地 Web 界面端口
     "extra_ssh_args": "",    # 追加到所有 ssh 命令的额外参数
+    "notify": True,          # 断开 / 重连成功等事件发系统通知
+    "theme": "auto",         # 界面主题：auto / dark / light
+    "language": "auto",      # 界面语言：auto / zh / en
+    "update_check": True,    # 启动时检查 GitHub 是否有新版本
+    "proxy_check": True,     # 定期探测本机目标端口（代理）是否在监听
 }
 
 SSH_BASE_OPTS_COMMON = [
@@ -485,9 +492,22 @@ class TunnelRuntime:
         self.log_path = LOG_DIR / f"{safe_filename(tunnel.get('name', ''))}-{tunnel['id'][:8]}.log"
         self.traffic = 0           # 累计总流量（上下行合计，含历次重连）
         self.rate = 0.0            # 最近一次采样的总速率（字节/秒）
-        self.traffic_history: collections.deque = collections.deque(maxlen=320)  # 每 ~2 秒一个采样点（≈10.7 分钟）
+        self.traffic_history: collections.deque = collections.deque(maxlen=320)  # 每 ~2 秒一个采样点 (时间, 字节)
         self._io_last: tuple[int, int] | None = None
         self._io_time = 0.0
+        # 本机目标端口（代理）健康状态
+        self.target_ok: bool | None = None
+        self.target_info = ""
+        # 持久化流量（跨重启，按天存档 + 总计）
+        today = datetime.now().strftime("%Y-%m-%d")
+        stored = (manager.traffic_store.get(tunnel["id"]) or {}) if manager else {}
+        days = stored.get("days") if isinstance(stored.get("days"), dict) else {}
+        self.persist_days: dict[str, int] = {str(k): int(v or 0) for k, v in days.items()}
+        self.persist_date = today
+        self.persist_today = int(self.persist_days.get(today, 0))
+        self.persist_total = int(stored.get("total") or 0)
+        self._persist_dirty = False
+        self._last_notify = 0.0
 
     # ---- 状态与日志 ----
 
@@ -515,11 +535,21 @@ class TunnelRuntime:
         msg, fatal = hit
         if fatal:
             self._set(last_error=msg, detail=msg)
+            if "已被占用" in msg:
+                self._notify_throttled(f"远端端口被占用：{self.tunnel['name']}", msg, min_interval=3600)
         else:
             self._set(warning=msg)
             with self.lock:
                 if self.state == "running":
                     self.detail = msg
+
+    def _notify_throttled(self, title: str, body: str, min_interval: float = 10.0) -> None:
+        now = time.time()
+        with self.lock:
+            if now - self._last_notify < min_interval:
+                return
+            self._last_notify = now
+        self.manager.notify(title, body)
 
     def get_lines_since(self, since: int) -> tuple[list[str], int]:
         with self.lock:
@@ -529,6 +559,17 @@ class TunnelRuntime:
             return lines, self.log_total
 
     # ---- 流量统计 ----
+
+    def _add_persist_locked(self, delta: int) -> None:
+        """按天累计持久化流量（需持有 self.lock）"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.persist_date != today:
+            self.persist_date = today
+            self.persist_today = 0
+        self.persist_today += delta
+        self.persist_total += delta
+        self.persist_days[today] = self.persist_today
+        self._persist_dirty = True
 
     def _sample_traffic(self, proc) -> None:
         now = time.time()
@@ -547,7 +588,8 @@ class TunnelRuntime:
             with self.lock:
                 self.traffic += delta
                 self.rate = delta / dt
-                self.traffic_history.append(delta)
+                self.traffic_history.append((round(now, 1), delta))
+                self._add_persist_locked(delta)
         self._io_last = io
         self._io_time = now
 
@@ -556,6 +598,12 @@ class TunnelRuntime:
             self.traffic = 0
             self.rate = 0.0
             self.traffic_history.clear()
+            today = datetime.now().strftime("%Y-%m-%d")
+            self.persist_date = today
+            self.persist_today = 0
+            self.persist_total = 0
+            self.persist_days = {today: 0}
+            self._persist_dirty = True
 
     # ---- 进程控制 ----
 
@@ -702,10 +750,14 @@ class TunnelRuntime:
                         break
                     if not announced and time.time() - t0 >= self.START_GRACE:
                         announced = True
+                        was_retries = self.retries
                         self._set(state="running", detail=self.warning, run_since=time.time(), retries=0)
                         self._io_last = read_process_io(proc.pid)
                         self._io_time = time.time()
                         self._log("===== 隧道已建立 =====")
+                        if was_retries >= 2:
+                            self._notify_throttled(f"隧道已重连：{self.tunnel['name']}",
+                                                   f"经 {was_retries} 次重试后恢复连接", min_interval=5)
                     if announced and time.time() - self._io_time >= 2.0:
                         self._sample_traffic(proc)
                     continue
@@ -740,19 +792,56 @@ class TunnelRuntime:
             if not self.tunnel.get("auto_reconnect", True):
                 self._set(state="error", detail=self.last_error or f"连接断开（退出码 {code}）", run_since=None)
                 self._log("未启用自动重连，不再重试")
+                self._notify_throttled(f"隧道断开：{self.tunnel['name']}",
+                                       self.last_error or f"连接断开（退出码 {code}）")
                 return
 
-            delay = max(1, int(self.manager.retry_seconds()))
             reason = self.last_error or f"连接断开（退出码 {code}）"
-            self._set(state="retry", detail=f"{reason}，{delay} 秒后重试…", run_since=None)
-            end = time.time() + delay
-            while not self.stop_event.is_set():
-                remaining = end - time.time()
-                if remaining <= 0:
-                    break
-                self.stop_event.wait(min(0.25, remaining))
+            with self.lock:
+                uptime = (time.time() - self.run_since) if self.run_since else 0.0
+            if uptime >= 60:  # 只对稳定运行后的断线发通知，避免服务器抖动刷屏
+                self._notify_throttled(f"隧道断开：{self.tunnel['name']}", reason, min_interval=30)
+
+            # 智能重连：指数退避（基准 ×2，封顶 60 秒）；网络恢复后立即重连
+            base = max(1, int(self.manager.retry_seconds()))
+            delay = min(60, base * (2 ** min(self.retries - 1, 3)))
+            self._set(state="retry",
+                      detail=f"{reason}，{delay} 秒后重试（已重试 {self.retries} 次）…",
+                      run_since=None)
+            self._wait_retry_or_network(delay)
 
         self._set(state="stopped", detail="", run_since=None)
+
+    def _ssh_endpoint(self) -> tuple[str, int] | None:
+        """解析该隧道对应的 SSH 服务器地址（用于网络恢复探测）"""
+        try:
+            if self.tunnel.get("mode") == "alias":
+                info = resolve_alias(self.tunnel["alias"])
+                return info["hostname"], int(info["port"])
+            return self.tunnel["host"], int(self.tunnel.get("port") or 22)
+        except Exception:
+            return None
+
+    def _wait_retry_or_network(self, delay: float) -> None:
+        """等待重试间隔；每 2 秒探测一次 SSH 端口，网络/服务器一恢复就立即重连"""
+        end = time.time() + delay
+        endpoint = self._ssh_endpoint()
+        next_probe = time.time() + 2.0
+        while not self.stop_event.is_set():
+            now = time.time()
+            if now >= end:
+                break
+            if endpoint and now >= next_probe:
+                next_probe = now + 2.0
+                host, port = endpoint
+                try:
+                    with socket.create_connection((host, port), timeout=1.5):
+                        pass
+                    self._log("===== 网络已恢复，立即重连 =====")
+                    break
+                except OSError:
+                    pass
+            self.stop_event.wait(0.25)
 
     # ---- 快照 ----
 
@@ -782,6 +871,10 @@ class TunnelRuntime:
                 "uptime": int(time.time() - self.run_since) if (self.run_since and self.state == "running") else 0,
                 "traffic": self.traffic,
                 "rate": round(self.rate, 1),
+                "traffic_today": self.persist_today,
+                "traffic_total": self.persist_total,
+                "target_ok": self.target_ok,
+                "target_info": self.target_info,
                 "history": list(self.traffic_history),
                 "pid": self.proc.pid if self.proc else None,
                 "log_file": str(self.log_path),
@@ -804,10 +897,101 @@ class Manager:
             pass
         self.lock = threading.RLock()
         self.config = load_config()
+        self.traffic_store = load_traffic_store()
         self.runtimes: dict[str, TunnelRuntime] = {}
         for t in self.config["tunnels"]:
             self.runtimes[t["id"]] = TunnelRuntime(t, self)
         save_config(self.config)
+        self.notifier = None          # 桌面层可覆盖（Windows 托盘通知等）
+        self.update_info: dict | None = None
+        threading.Thread(target=self._background_loop, daemon=True).start()
+        if self.config["settings"].get("update_check", True):
+            threading.Thread(target=self._refresh_update_info, daemon=True).start()
+
+    # ---- 通知 / 后台巡检 / 流量持久化 ----
+
+    def notify(self, title: str, body: str) -> None:
+        if not self.config["settings"].get("notify", True):
+            return
+        fn = self.notifier or default_notify
+        try:
+            fn(title, body)
+        except Exception:
+            pass
+
+    def set_notifier(self, fn) -> None:
+        """桌面层注入通知实现（如 Windows 托盘气泡）"""
+        self.notifier = fn
+
+    def _refresh_update_info(self) -> None:
+        try:
+            self.update_info = check_update(force=False)
+        except Exception:
+            self.update_info = None
+
+    def _background_loop(self) -> None:
+        """每 5 秒：本机目标端口健康检查；每 30 秒：流量落盘"""
+        last_flush = 0.0
+        while True:
+            time.sleep(5)
+            try:
+                if self.config["settings"].get("proxy_check", True):
+                    self._check_targets()
+                if time.time() - last_flush >= 30:
+                    self.flush_traffic()
+                    last_flush = time.time()
+            except Exception:
+                pass
+
+    def _check_targets(self) -> None:
+        for rt in list(self.runtimes.values()):
+            if rt.state != "running":
+                with rt.lock:
+                    rt.target_ok = None
+                continue
+            ok = True
+            info = ""
+            seen = set()
+            for rule in rt.tunnel.get("rules") or []:
+                target = str(rule.get("local_target") or "").strip()
+                if not target or target in seen:
+                    continue
+                seen.add(target)
+                host, _, port = target.rpartition(":")
+                host = host.strip("[]") or "127.0.0.1"
+                try:
+                    port_i = int(port)
+                except ValueError:
+                    continue
+                info = f"{host}:{port_i}"
+                try:
+                    with socket.create_connection((host, port_i), timeout=1.0):
+                        pass
+                except OSError:
+                    ok = False
+                    break
+            with rt.lock:
+                was = rt.target_ok
+                rt.target_ok = ok if seen else None
+                rt.target_info = info
+                if was is False and rt.target_ok is True:
+                    rt.detail = "" if (rt.detail and "没有服务" in rt.detail) else rt.detail
+            if was is False and rt.target_ok is True:
+                rt._log(f"===== 本机代理已恢复（{info}）=====")
+
+    def flush_traffic(self) -> None:
+        store: dict = {}
+        any_dirty = False
+        for tid, rt in list(self.runtimes.items()):
+            with rt.lock:
+                if rt._persist_dirty:
+                    rt._persist_dirty = False
+                    any_dirty = True
+                days = dict(sorted(rt.persist_days.items())[-30:])
+                store[tid] = {"total": rt.persist_total, "days": days}
+        if any_dirty:
+            self.traffic_store = store
+            save_traffic_store(store)
 
     # ---- 辅助 ----
 
@@ -835,6 +1019,7 @@ class Manager:
                 "version": VERSION,
                 "settings": dict(self.config["settings"]),
                 "tunnels": [rt.snapshot() for rt in self.runtimes.values()],
+                "update": self.update_info,
             }
 
     def logs(self, tid: str, since: int) -> dict:
@@ -872,6 +1057,7 @@ class Manager:
             self.config["tunnels"].remove(rt.tunnel)
             del self.runtimes[tid]
             save_config(self.config)
+        self.flush_traffic()
 
     def duplicate(self, tid: str) -> dict:
         with self.lock:
@@ -922,6 +1108,7 @@ class Manager:
         with self.lock:
             for rt in list(self.runtimes.values()):
                 rt.stop()
+        self.flush_traffic()
 
     def start_enabled(self) -> None:
         with self.lock:
@@ -944,6 +1131,14 @@ class Manager:
                     self.config["settings"][key] = str(data[key]).strip()
                 elif key == "ui_port":
                     self.config["settings"][key] = max(1, min(65535, int(data[key])))
+                elif key in ("notify", "update_check", "proxy_check"):
+                    self.config["settings"][key] = bool(data[key])
+                elif key == "theme":
+                    v = str(data[key])
+                    self.config["settings"][key] = v if v in ("auto", "dark", "light") else "auto"
+                elif key == "language":
+                    v = str(data[key])
+                    self.config["settings"][key] = v if v in ("auto", "zh", "en") else "auto"
             save_config(self.config)
             return dict(self.config["settings"])
 
@@ -1057,6 +1252,107 @@ def set_autostart(enabled: bool) -> bool:
     return autostart_enabled()
 
 
+# ---------------------------------------------------------------- 通知 / 流量持久化 / 更新检查
+
+TRAFFIC_FILE = DATA_DIR / "traffic.json"
+UPDATE_CACHE_FILE = DATA_DIR / "update_check.json"
+UPDATE_API = "https://api.github.com/repos/wuxinxin27/reverse-tunnel-manager/releases/latest"
+
+
+def default_notify(title: str, body: str) -> None:
+    """默认系统通知（Linux: notify-send；macOS: osascript；Windows 由桌面层接管）"""
+    try:
+        if os.name == "nt":
+            return
+        if sys.platform == "darwin":
+            script = (f'display notification {json.dumps(body, ensure_ascii=False)} '
+                      f'with title {json.dumps(title, ensure_ascii=False)}')
+            subprocess.Popen(["osascript", "-e", script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        subprocess.Popen(["notify-send", "-a", "反向隧道管理器", title, body],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _version_tuple(v: str) -> tuple:
+    try:
+        return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3]) or (0,)
+    except Exception:
+        return (0,)
+
+
+def check_update(force: bool = False) -> dict:
+    """检查 GitHub 最新 Release；结果缓存 6 小时，网络失败时退回缓存。"""
+    now = time.time()
+    cached = None
+    try:
+        if UPDATE_CACHE_FILE.exists():
+            cached = json.loads(UPDATE_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        cached = None
+    if not force and cached and now - float(cached.get("checked_at") or 0) < 6 * 3600:
+        return cached
+    try:
+        req = urllib.request.Request(UPDATE_API, headers={
+            "User-Agent": "reverse-tunnel-manager",
+            "Accept": "application/vnd.github+json",
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        latest = str(data.get("tag_name", "")).lstrip("v")
+        want_ext = ".exe" if os.name == "nt" else (".dmg" if sys.platform == "darwin" else ".deb")
+        asset_url = ""
+        for a in data.get("assets", []) or []:
+            if str(a.get("name", "")).endswith(want_ext):
+                asset_url = a.get("browser_download_url", "")
+                break
+        info = {
+            "checked_at": now,
+            "current": VERSION,
+            "latest": latest,
+            "has_update": bool(latest) and _version_tuple(latest) > _version_tuple(VERSION),
+            "url": data.get("html_url", ""),
+            "asset_url": asset_url,
+            "error": "",
+        }
+    except Exception as e:
+        if cached:
+            cached = dict(cached)
+            cached["error"] = f"检查失败：{e}"
+            return cached
+        return {"checked_at": now, "current": VERSION, "latest": "",
+                "has_update": False, "url": "", "asset_url": "", "error": str(e)}
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        UPDATE_CACHE_FILE.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return info
+
+
+def load_traffic_store() -> dict:
+    try:
+        if TRAFFIC_FILE.exists():
+            data = json.loads(TRAFFIC_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_traffic_store(data: dict) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = TRAFFIC_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, TRAFFIC_FILE)
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------- HTTP 服务
 
 class Handler(BaseHTTPRequestHandler):
@@ -1155,6 +1451,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if path == "/api/autostart":
                 return self._json({"enabled": set_autostart(bool(data.get("enabled")))})
+            if path == "/api/update_check":
+                info = check_update(force=bool(data.get("force", True)))
+                self.manager.update_info = info
+                return self._json(info)
             if path == "/api/quit":
                 self.manager.stop_all()
                 if callable(self.shutdown_cb):
@@ -1266,6 +1566,7 @@ def main():
     httpd.daemon_threads = True
 
     atexit.register(manager.stop_all)
+    atexit.register(manager.flush_traffic)
 
     def _on_signal(signum, frame):
         manager.stop_all()

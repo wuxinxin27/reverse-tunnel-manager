@@ -134,6 +134,37 @@ def _tray_icon_file() -> str:
     return str(src)
 
 
+def _fmt_bytes(n) -> str:
+    try:
+        v = float(n)
+    except (TypeError, ValueError):
+        v = 0.0
+    units = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    while v >= 1024 and i < len(units) - 1:
+        v /= 1024.0
+        i += 1
+    return (f"{v:.0f}" if i == 0 else f"{v:.1f}") + " " + units[i]
+
+
+_TRAY_LABELS = {
+    "zh": {"title": "反向隧道管理器", "show": "显示主界面", "start_all": "全部启动",
+           "stop_all": "全部停止", "quit": "退出（停止全部隧道）", "running": "条运行中"},
+    "en": {"title": "Reverse Tunnel Manager", "show": "Show window", "start_all": "Start all",
+           "stop_all": "Stop all", "quit": "Quit (stop all tunnels)", "running": "running"},
+}
+
+
+def _tray_lang(manager) -> str:
+    try:
+        lang = str(manager.config["settings"].get("language", "auto"))
+    except Exception:
+        lang = "auto"
+    if lang in ("zh", "en"):
+        return lang
+    return "zh" if str(os.environ.get("LANG", "")).lower().startswith("zh") else "en"
+
+
 def _create_tray_win32(window, manager, quit_cb):
     """Windows 系统托盘（pystray；打包版已内置）。不可用时返回 None。"""
     try:
@@ -147,6 +178,8 @@ def _create_tray_win32(window, manager, quit_cb):
         image.load()
     except Exception:
         return None
+
+    L = _TRAY_LABELS[_tray_lang(manager)]
 
     def on_show(icon, item):
         try:
@@ -164,19 +197,56 @@ def _create_tray_win32(window, manager, quit_cb):
     def on_quit(icon, item):
         quit_cb()
 
-    menu = pystray.Menu(
-        pystray.MenuItem("显示主界面", on_show, default=True),
-        pystray.MenuItem("全部启动", on_start_all),
-        pystray.MenuItem("全部停止", on_stop_all),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("退出（停止全部隧道）", on_quit),
-    )
+    def build_menu():
+        items = []
+        try:
+            snaps = manager.state()["tunnels"]
+        except Exception:
+            snaps = []
+        for snap in snaps:
+            running = snap["state"] == "running"
+            label = ("● " if running else "○ ") + str(snap.get("name") or "")
+            tid = snap["id"]
+
+            def _toggle(icon, item, _tid=tid, _run=running):
+                try:
+                    if _run:
+                        manager.stop(_tid)
+                    else:
+                        manager.start(_tid)
+                except Exception:
+                    pass
+
+            items.append(pystray.MenuItem(label, _toggle))
+        if items:
+            items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem(L["show"], on_show, default=True))
+        items.append(pystray.MenuItem(L["start_all"], on_start_all))
+        items.append(pystray.MenuItem(L["stop_all"], on_stop_all))
+        items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem(L["quit"], on_quit))
+        return items
+
     try:
-        icon = pystray.Icon("reverse-tunnel-manager", image, "反向隧道管理器", menu)
+        menu = pystray.Menu(build_menu)
+        icon = pystray.Icon("reverse-tunnel-manager", image, L["title"], menu)
         threading.Thread(target=icon.run, daemon=True).start()
-        return icon
     except Exception:
         return None
+
+    def _title_loop():
+        while True:
+            try:
+                snaps = manager.state()["tunnels"]
+                rate = sum(int(x.get("rate") or 0) for x in snaps)
+                running = sum(1 for x in snaps if x["state"] == "running")
+                icon.title = f'{L["title"]} — ⇅ {_fmt_bytes(rate)}/s · {running} {L["running"]}'
+            except Exception:
+                pass
+            time.sleep(3)
+
+    threading.Thread(target=_title_loop, daemon=True).start()
+    return icon
 
 
 # ---------------------------------------------------------------- Linux：GTK + WebKit2
@@ -243,15 +313,14 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
                   "（可安装 gir1.2-ayatanaappindicator3-0.1 或 gir1.2-appindicator3-0.1 后重启）")
         else:
             try:
+                L = _TRAY_LABELS[_tray_lang(manager)]
                 indicator = AppIndicator.Indicator.new(
                     "reverse-tunnel-manager",
                     _tray_icon_file(),
                     AppIndicator.IndicatorCategory.APPLICATION_STATUS,
                 )
                 indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
-                indicator.set_title("反向隧道管理器")
-
-                menu = Gtk.Menu()
+                indicator.set_title(L["title"])
 
                 def _menu_item(label, cb):
                     item = Gtk.MenuItem(label=label)
@@ -262,17 +331,53 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
                     win.show_all()
                     win.present()
 
-                menu.append(_menu_item("显示主界面", _show_window))
-                menu.append(_menu_item("全部启动",
-                                       lambda: threading.Thread(target=manager.start_all, daemon=True).start()))
-                menu.append(_menu_item("全部停止",
-                                       lambda: threading.Thread(target=manager.stop_all, daemon=True).start()))
-                menu.append(Gtk.SeparatorMenuItem())
-                menu.append(_menu_item("退出（停止全部隧道）", lambda: quit_all()))
-                menu.show_all()
-                indicator.set_menu(menu)
+                def _run_bg(fn, *args):
+                    threading.Thread(target=fn, args=args, daemon=True).start()
+
+                sig = {"last": None}
+
+                def _rebuild_menu():
+                    try:
+                        snaps = manager.state()["tunnels"]
+                    except Exception:
+                        snaps = []
+                    m = Gtk.Menu()
+                    for snap in snaps:
+                        running = snap["state"] == "running"
+                        label = ("● " if running else "○ ") + str(snap.get("name") or "")
+                        tid = snap["id"]
+                        if running:
+                            m.append(_menu_item(label, lambda _t=tid: _run_bg(manager.stop, _t)))
+                        else:
+                            m.append(_menu_item(label, lambda _t=tid: _run_bg(manager.start, _t)))
+                    if snaps:
+                        m.append(Gtk.SeparatorMenuItem())
+                    m.append(_menu_item(L["show"], _show_window))
+                    m.append(_menu_item(L["start_all"], lambda: _run_bg(manager.start_all)))
+                    m.append(_menu_item(L["stop_all"], lambda: _run_bg(manager.stop_all)))
+                    m.append(Gtk.SeparatorMenuItem())
+                    m.append(_menu_item(L["quit"], lambda: quit_all()))
+                    m.show_all()
+                    indicator.set_menu(m)
+
+                def _tick():
+                    try:
+                        snaps = manager.state()["tunnels"]
+                        running = sum(1 for s in snaps if s["state"] == "running")
+                        rate = sum(int(s.get("rate") or 0) for s in snaps)
+                        indicator.set_title(f'{L["title"]} — ⇅ {_fmt_bytes(rate)}/s · {running} {L["running"]}')
+                        state_sig = "|".join(f'{s["id"]}:{s["state"]}:{s["name"]}' for s in snaps)
+                        if state_sig != sig["last"]:
+                            sig["last"] = state_sig
+                            _rebuild_menu()
+                    except Exception:
+                        pass
+                    return True
+
+                _rebuild_menu()
+                GLib.timeout_add_seconds(3, _tick)
                 tray_available = True
-                print("系统托盘已启用")
+                print("系统托盘已启用（动态隧道菜单 + 速率显示）")
             except Exception as e:
                 print(f"[提示] 系统托盘初始化失败（{e}）")
                 indicator = None
@@ -387,10 +492,17 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
             except Exception:
                 pass
 
-        if owns:
+        if owns and sys.platform != "darwin":
             tray_icon = _create_tray_win32(window, manager, lambda: quit_all())
+            if tray_icon is not None:
+                try:
+                    manager.set_notifier(lambda title, body, _i=tray_icon: _i.notify(body, title))
+                except Exception:
+                    pass
             if tray_icon is None:
                 print("[提示] 未启用系统托盘（源码运行可 pip install pystray pillow 后重启）")
+        elif owns:
+            print("[提示] macOS 上暂不支持系统托盘；关闭窗口将退出工具。")
 
         def on_closing():
             if state["quitting"] or not owns:

@@ -320,3 +320,68 @@ hr { border: none; border-top: 1px solid var(--border); margin: 14px 0 0; }
 ::-webkit-scrollbar-thumb { background: #2c3542; border-radius: 6px; }
 ::-webkit-scrollbar-thumb:hover { background: #39465a; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 浅色主题 ---------- */
+
+[data-theme="light"] {
+  --bg: #f2f4f8;
+  --panel: #ffffff;
+  --panel-2: #eef1f6;
+  --border: #d7dde6;
+  --text: #1f2733;
+  --muted: #66707d;
+  --green: #1d9f57;
+  --yellow: #b07d17;
+  --orange: #c96a1e;
+  --red: #cf3a3a;
+  --grey: #8b95a3;
+}
+
+[data-theme="light"] header { background: linear-gradient(180deg, #ffffff, #f4f6fa); }
+[data-theme="light"] .logo { background: #dbe7ff; }
+[data-theme="light"] .btn:hover { background: #e3e9f2; border-color: #c6cfdd; }
+[data-theme="light"] .card:hover { border-color: #b9c3d2; }
+[data-theme="light"] .badge.stopped { background: #e9edf3; }
+[data-theme="light"] .badge.starting { background: #f7ecd2; }
+[data-theme="light"] .badge.running { background: #dcf3e5; }
+[data-theme="light"] .badge.retry { background: #f9e8d8; }
+[data-theme="light"] .badge.error { background: #f8dede; }
+[data-theme="light"] .chip { color: #3f5f96; }
+[data-theme="light"] .card-traffic { color: #3f5f96; }
+[data-theme="light"] #logview { color: #4a5566; }
+[data-theme="light"] .modal { background: rgba(15, 23, 42, .35); }
+[data-theme="light"] ::-webkit-scrollbar-thumb { background: #c9d2de; }
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #aeb9c9; }
+
+/* ---------- 图表悬停提示 ---------- */
+
+.chart-wrap { position: relative; }
+.chart-tip {
+  position: absolute;
+  top: 2px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  color: var(--text);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 5;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .25);
+}
+
+/* ---------- 更新提示 ---------- */
+
+.update-banner {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  text-decoration: none;
+  color: #0b5d31;
+  background: #c9f2da;
+  border: 1px solid #8fd9ae;
+}
+.update-banner:hover { background: #d9f7e6; }

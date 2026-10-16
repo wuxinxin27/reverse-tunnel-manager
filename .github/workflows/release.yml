@@ -80,9 +80,56 @@ jobs:
           name: windows-installer
           path: dist/*setup.exe
 
+  build-macos:
+    name: macOS 安装包（.dmg）
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install --no-cache-dir pyinstaller pywebview pystray pillow
+
+      - name: 生成 icns 图标
+        run: |
+          mkdir -p build/icon.iconset
+          for s in 16 32 64 128 256 512; do
+            sips -z $s $s assets/icon-512.png --out build/icon.iconset/icon_${s}x${s}.png >/dev/null
+            d=$((s * 2))
+            sips -z $d $d assets/icon-512.png --out "build/icon.iconset/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns build/icon.iconset -o build/icon.icns
+
+      - name: PyInstaller 打包 .app
+        run: |
+          pyinstaller --noconfirm --clean --windowed \
+            --name ReverseTunnelManager \
+            --icon build/icon.icns \
+            --osx-bundle-identifier io.github.wuxinxin27.reversetunnelmanager \
+            --add-data "static:static" \
+            --add-data "assets:assets" \
+            --collect-all webview \
+            desktop.py
+
+      - name: 制作 DMG
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="0.0.0-dev"; fi
+          mkdir -p dist
+          hdiutil create -volname "Reverse Tunnel Manager" \
+            -srcfolder "dist/ReverseTunnelManager.app" -ov -format UDZO \
+            "dist/ReverseTunnelManager-${VERSION}-macOS.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: dist/*.dmg
+
   release:
     name: 发布 Release
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
