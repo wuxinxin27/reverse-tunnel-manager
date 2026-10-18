@@ -75,13 +75,18 @@ const I18N = {
     "settings.notify": "断线 / 重连等事件发送系统通知",
     "settings.proxy_check": "定期检查本机代理端口是否在监听",
     "settings.update_check": "启动时自动检查新版本",
+    "settings.auto_update": "发现新版本后自动在应用内更新并重启",
     "settings.export": "导出配置", "settings.import": "导入配置", "settings.check_update": "检查更新",
     "settings.quit": "停止全部并退出工具", "settings.save": "保存设置",
     "settings.about": "版本 {0}",
     "settings.checking": "检查中…", "settings.up_to_date": "已是最新版本",
     "settings.update_available": "发现新版本 {0}",
     "settings.check_failed": "检查失败：{0}",
-    "update.banner": "🎉 新版本 {0} · 点此查看",
+    "update.banner": "🎉 新版本 {0} · 立即更新",
+    "update.downloading": "⬇ 正在下载 {0}%…",
+    "update.installing": "⚙ 正在安装，即将自动重启…",
+    "update.restarting": "⟳ 正在重启…",
+    "update.failed": "更新失败：{0}",
     "offline": "与工具后端失去连接 —— 如果工具已退出，请重新运行 app.py",
     "tray.unavailable": "⚠ 系统托盘不可用：关闭或最小化窗口将退出。详见 logs/desktop.log",
     "time.h": "{0} 小时 {1} 分", "time.m": "{0} 分 {1} 秒", "time.s": "{0} 秒",
@@ -159,13 +164,18 @@ const I18N = {
     "settings.notify": "Show system notifications on disconnect / reconnect",
     "settings.proxy_check": "Periodically check the local proxy port",
     "settings.update_check": "Check for updates on launch",
+    "settings.auto_update": "Automatically update in-app and restart when a new version is found",
     "settings.export": "Export config", "settings.import": "Import config", "settings.check_update": "Check update",
     "settings.quit": "Stop all & quit", "settings.save": "Save settings",
     "settings.about": "version {0}",
     "settings.checking": "Checking…", "settings.up_to_date": "Up to date",
     "settings.update_available": "New version {0} available",
     "settings.check_failed": "Check failed: {0}",
-    "update.banner": "🎉 New version {0} · click here",
+    "update.banner": "🎉 New version {0} · Update now",
+    "update.downloading": "⬇ Downloading {0}%…",
+    "update.installing": "⚙ Installing, will restart automatically…",
+    "update.restarting": "⟳ Restarting…",
+    "update.failed": "Update failed: {0}",
     "offline": "Backend unreachable — restart the app if it was closed",
     "tray.unavailable": "⚠ System tray unavailable: closing or minimizing will quit. See logs/desktop.log",
     "time.h": "{0}h {1}m", "time.m": "{0}m {1}s", "time.s": "{0}s",
@@ -306,6 +316,8 @@ const S = {
   logLines: [],
   editingId: null,
   updateToastShown: false,
+  updateJob: null,
+  updateFailShown: "",
   trayWarnShown: false,
 };
 
@@ -318,6 +330,7 @@ async function loadState() {
     S.settings = data.settings || {};
     S.version = data.version || "";
     S.update = data.update || null;
+    S.updateJob = data.update_job || null;
     if (data.tray === false && !S.trayWarnShown) {
       S.trayWarnShown = true;
       toast(t("tray.unavailable"), "error");
@@ -340,17 +353,51 @@ async function loadState() {
 
 function renderUpdateBanner() {
   const banner = $("#update-banner");
+  const job = S.updateJob;
   const u = S.update;
-  if (u && u.has_update && u.latest) {
-    banner.href = u.asset_url || u.url || "#";
-    banner.textContent = t("update.banner", "v" + u.latest);
+
+  if (job && ["downloading", "installing", "restarting"].includes(job.phase)) {
     banner.classList.remove("hidden");
+    banner.disabled = true;
+    if (job.phase === "downloading") banner.textContent = t("update.downloading", job.percent || 0);
+    else if (job.phase === "installing") banner.textContent = t("update.installing");
+    else banner.textContent = t("update.restarting");
+    return;
+  }
+
+  if (job && job.phase === "failed") {
+    banner.classList.remove("hidden");
+    banner.disabled = false;
+    banner.textContent = u && u.latest ? t("update.banner", "v" + u.latest) : t("app.title");
+    const key = (job.version || "") + "|" + (job.error || "");
+    if (S.updateFailShown !== key) {
+      S.updateFailShown = key;
+      toast(t("update.failed", job.message || job.error || "unknown"), "error");
+    }
+    return;
+  }
+
+  if (u && u.has_update && u.latest) {
+    banner.classList.remove("hidden");
+    banner.disabled = false;
+    banner.textContent = t("update.banner", "v" + u.latest);
     if (!S.updateToastShown) {
       S.updateToastShown = true;
       toast(t("settings.update_available", "v" + u.latest), "success");
     }
-  } else {
-    banner.classList.add("hidden");
+    return;
+  }
+
+  banner.classList.add("hidden");
+}
+
+async function startUpdateInstall() {
+  try {
+    await api("/api/update_install", { method: "POST", body: JSON.stringify({}) });
+    toast(t("update.downloading", 0), "success");
+    await loadState();
+  } catch (e) {
+    toast(e.message, "error");
   }
 }
 
@@ -756,6 +803,7 @@ function openSettings() {
   $("#s-notify").checked = s.notify !== false;
   $("#s-proxy-check").checked = s.proxy_check !== false;
   $("#s-update-check").checked = s.update_check !== false;
+  $("#s-auto-update").checked = s.auto_update !== false;
   $("#about").textContent = t("settings.about", "v" + S.version);
   api("/api/autostart").then((r) => { $("#s-autostart").checked = !!r.enabled; }).catch(() => {});
   $("#settings").classList.remove("hidden");
@@ -775,6 +823,7 @@ async function saveSettings() {
         notify: $("#s-notify").checked,
         proxy_check: $("#s-proxy-check").checked,
         update_check: $("#s-update-check").checked,
+        auto_update: $("#s-auto-update").checked,
       }),
     });
     await api("/api/autostart", {
@@ -837,6 +886,7 @@ function bind() {
   $("#btn-stop-all").addEventListener("click", stopAll);
   $("#btn-new").addEventListener("click", () => openEditor(null));
   $("#btn-settings").addEventListener("click", openSettings);
+  $("#update-banner").addEventListener("click", startUpdateInstall);
 
   document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", setModeUI));
   $("#btn-add-rule").addEventListener("click", () => addRuleRow({}));

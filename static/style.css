@@ -379,9 +379,12 @@ hr { border: none; border-top: 1px solid var(--border); margin: 14px 0 0; }
   padding: 6px 12px;
   border-radius: 8px;
   font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
   text-decoration: none;
   color: #0b5d31;
   background: #c9f2da;
   border: 1px solid #8fd9ae;
 }
 .update-banner:hover { background: #d9f7e6; }
+.update-banner:disabled { cursor: default; opacity: .85; }

@@ -32,6 +32,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import urllib.request
@@ -49,7 +50,7 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 ICON_FILE = APP_DIR / "assets" / "icon.svg"
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 
 
 def _base_dir(kind: str) -> Path:
@@ -88,6 +89,7 @@ DEFAULT_SETTINGS = {
     "theme": "auto",         # 界面主题：auto / dark / light
     "language": "auto",      # 界面语言：auto / zh / en
     "update_check": True,    # 启动时检查 GitHub 是否有新版本
+    "auto_update": True,     # 发现新版本后自动在应用内下载安装并重启
     "proxy_check": True,     # 定期探测本机目标端口（代理）是否在监听
 }
 
@@ -922,6 +924,9 @@ class Manager:
         self.notifier = None          # 桌面层可覆盖（Windows 托盘通知等）
         self.tray_available: bool | None = None  # 桌面层上报系统托盘是否可用
         self.update_info: dict | None = None
+        self.update_job: dict | None = None      # 应用内更新进度
+        self.on_quit_request = None              # 桌面层注入（更新完成后自动重启用）
+        self._update_lock = threading.Lock()
         threading.Thread(target=self._background_loop, daemon=True).start()
         if self.config["settings"].get("update_check", True):
             threading.Thread(target=self._refresh_update_info, daemon=True).start()
@@ -946,6 +951,279 @@ class Manager:
             self.update_info = check_update(force=False)
         except Exception:
             self.update_info = None
+        self._maybe_auto_update()
+
+    # ---- 应用内自动更新 ----
+
+    def _update_progress(self, **kw) -> None:
+        with self._update_lock:
+            if self.update_job is None:
+                self.update_job = {}
+            self.update_job.update(kw)
+
+    def _select_update_asset(self) -> tuple[str, str, str]:
+        """返回 (下载地址, 后缀, 文件名)；Linux 优先可写目录用 .tar.gz（免 root）。"""
+        info = self.update_info or {}
+        assets = info.get("assets") or []
+
+        def find(*exts):
+            for ext in exts:
+                for a in assets:
+                    if str(a.get("name", "")).lower().endswith(ext):
+                        return str(a.get("url", "")), ext, str(a.get("name", ""))
+            return "", "", ""
+
+        if os.name == "nt":
+            return find(".exe")
+        if sys.platform == "darwin":
+            return find(".dmg")
+        if os.access(APP_DIR, os.W_OK):
+            return find(".tar.gz") or find(".deb")
+        return find(".deb")
+
+    def start_update_install(self) -> dict:
+        with self._update_lock:
+            job = dict(self.update_job or {})
+            if job.get("phase") in ("downloading", "installing", "restarting"):
+                return job
+        info = self.update_info or {}
+        if not info.get("has_update") or not info.get("latest"):
+            raise RuntimeError("当前没有可用更新")
+        url, ext, name = self._select_update_asset()
+        if not url:
+            raise RuntimeError("没有找到适合当前平台的安装包")
+        if not url.startswith("https://github.com/wuxinxin27/reverse-tunnel-manager/"):
+            raise RuntimeError("安装包地址不受信任，已取消")
+        with self._update_lock:
+            self.update_job = {"phase": "downloading", "percent": 0, "message": "正在下载…",
+                               "version": info["latest"], "error": ""}
+            job = dict(self.update_job)
+        threading.Thread(target=self._update_worker, args=(url, ext, name), daemon=True).start()
+        return job
+
+    def _update_worker(self, url: str, ext: str, name: str) -> None:
+        try:
+            work = DATA_DIR / "update"
+            shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True, exist_ok=True)
+            dest = work / safe_filename(name)
+            self._update_progress(phase="downloading", percent=0, message="正在下载…")
+            self._download(url, dest)
+            self._update_progress(phase="installing", percent=100, message="正在安装…")
+            if os.name == "nt":
+                self._apply_windows(dest)
+            elif sys.platform == "darwin":
+                self._apply_macos(dest)
+            elif ext == ".tar.gz":
+                self._apply_portable(dest)
+                self._update_progress(phase="restarting", message="正在重启…")
+                self._restart_after_update()
+            else:
+                self._apply_deb(dest)
+                self._update_progress(phase="restarting", message="正在重启…")
+                self._restart_after_update()
+        except Exception as e:
+            self._update_progress(phase="failed", message=f"更新失败：{e}", error=str(e))
+            self._mark_update_failed()
+            self.notify("自动更新失败", str(e))
+
+    def _download(self, url: str, dest: Path) -> None:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "reverse-tunnel-manager", "Accept": "application/octet-stream"})
+        with urllib.request.urlopen(req, timeout=90) as r, open(dest, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            got = 0
+            last = 0.0
+            while True:
+                chunk = r.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                now = time.time()
+                if total and now - last > 0.3:
+                    last = now
+                    pct = min(99, int(got * 100 / total))
+                    self._update_progress(percent=pct, message=f"正在下载 {pct}%…")
+        if dest.stat().st_size < 1024:
+            raise RuntimeError("下载的安装包异常（文件过小）")
+
+    # -- 各平台安装 --
+
+    def _windows_update_script(self, installer: Path, target: Path) -> str:
+        """生成隐藏的 PowerShell 更新脚本内容（等待退出 → 静默安装 → 启动新版）。"""
+        return (
+            "$oldPid = " + str(os.getpid()) + "\n"
+            "$deadline = (Get-Date).AddSeconds(180)\n"
+            "while ((Get-Date) -lt $deadline) {\n"
+            "    if (-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) { break }\n"
+            "    Start-Sleep -Milliseconds 300\n"
+            "}\n"
+            "Start-Sleep -Milliseconds 500\n"
+            'Start-Process -FilePath "' + str(installer) + '" '
+            "-ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES' -Wait\n"
+            "Start-Sleep -Milliseconds 800\n"
+            'Start-Process -FilePath "' + str(target) + '"\n'
+        )
+
+    def _apply_windows(self, installer: Path) -> None:
+        """隐藏的 PowerShell 更新脚本：等旧进程退出 → 静默安装 → 启动新版本。"""
+        target = Path(sys.executable)
+        script = installer.parent / "apply_update.ps1"
+        script.write_text(self._windows_update_script(installer, target), encoding="utf-8-sig")
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-WindowStyle", "Hidden", "-File", str(script)],
+            creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True,
+        )
+        self._update_progress(phase="installing", message="正在安装，完成后将自动重启…")
+        time.sleep(0.6)
+        self.request_quit()
+
+    def _apply_portable(self, archive: Path) -> None:
+        """Linux 源码/绿色版：解压覆盖程序文件（用户配置不受影响）。"""
+        self._update_progress(phase="installing", message="正在替换程序文件…")
+        tmp = archive.parent / "extract"
+        shutil.rmtree(tmp, ignore_errors=True)
+        with tarfile.open(archive, "r:gz") as tf:
+            try:
+                tf.extractall(tmp, filter="data")
+            except TypeError:
+                tf.extractall(tmp)
+        dirs = [p for p in tmp.iterdir() if p.is_dir()]
+        src = dirs[0] if dirs else tmp
+        for fname in ("app.py", "desktop.py"):
+            if (src / fname).exists():
+                shutil.copy2(src / fname, APP_DIR / fname)
+        for dname in ("static", "assets", "tools"):
+            if (src / dname).is_dir():
+                shutil.copytree(src / dname, APP_DIR / dname, dirs_exist_ok=True)
+
+    def _apply_deb(self, deb: Path) -> None:
+        pkexec = shutil.which("pkexec")
+        apt = shutil.which("apt-get") or shutil.which("apt")
+        if not pkexec or not apt:
+            raise RuntimeError(f"无法自动安装（缺少 pkexec/apt），请手动安装：{deb}")
+        self._update_progress(phase="installing", message="正在请求权限安装（请在系统弹窗输入密码）…")
+        proc = subprocess.run(
+            [pkexec, "env", "DEBIAN_FRONTEND=noninteractive", apt, "install", "-y", str(deb)],
+            capture_output=True, text=True, timeout=600,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip()[-300:]
+            raise RuntimeError(f"安装失败：{tail or '未知错误'}")
+
+    def _apply_macos(self, dmg: Path) -> None:
+        self._update_progress(phase="installing", message="正在安装…")
+        if not getattr(sys, "frozen", False):
+            raise RuntimeError("源码运行模式不支持自动安装 macOS 更新")
+        exe = Path(sys.executable).resolve()
+        app_path = None
+        for parent in exe.parents:
+            if parent.suffix == ".app":
+                app_path = parent
+                break
+        if app_path is None:
+            raise RuntimeError("找不到 .app 安装目录")
+        attach = subprocess.run(["hdiutil", "attach", str(dmg), "-nobrowse", "-quiet"],
+                                capture_output=True, text=True, timeout=180)
+        if attach.returncode != 0:
+            raise RuntimeError("无法挂载 dmg：" + (attach.stderr or "").strip()[-200:])
+        vol = Path(attach.stdout.strip().splitlines()[-1].split("\t")[-1])
+        try:
+            src_app = next(vol.glob("*.app"), None)
+            if src_app is None:
+                raise RuntimeError("dmg 中没有找到 App")
+            subprocess.run(["ditto", str(src_app), str(app_path)], check=True, timeout=600)
+        finally:
+            subprocess.run(["hdiutil", "detach", str(vol), "-quiet"], check=False)
+        self._update_progress(phase="restarting", message="正在重启…")
+        self._restart_after_update(app_path=str(app_path))
+
+    def _restart_after_update(self, app_path: str = "") -> None:
+        """等旧实例释放端口后启动新进程（POSIX）。"""
+        port = int(self.config["settings"].get("ui_port", 8787))
+        if sys.platform == "darwin" and app_path:
+            cmd = ["open", "-n", app_path]
+        elif getattr(sys, "frozen", False):
+            cmd = [sys.executable] + list(sys.argv[1:])
+        else:
+            cmd = [sys.executable, str(APP_DIR / "desktop.py")] + list(sys.argv[1:])
+        helper = (
+            "import socket, subprocess, sys, time\n"
+            f"argv = {cmd!r}\n"
+            f"port = {port}\n"
+            "for _ in range(200):\n"
+            "    s = socket.socket()\n"
+            "    try:\n"
+            "        if s.connect_ex(('127.0.0.1', port)) != 0:\n"
+            "            break\n"
+            "    finally:\n"
+            "        s.close()\n"
+            "    time.sleep(0.2)\n"
+            "time.sleep(0.3)\n"
+            "subprocess.Popen(argv)\n"
+        )
+        subprocess.Popen([sys.executable, "-c", helper], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.4)
+        self.request_quit()
+
+    def request_quit(self) -> None:
+        cb = self.on_quit_request
+        if cb is not None:
+            try:
+                cb()
+                return
+            except Exception:
+                pass
+        threading.Thread(target=self._hard_quit, daemon=True).start()
+
+    def _hard_quit(self) -> None:
+        time.sleep(0.5)
+        try:
+            self.stop_all()
+        finally:
+            os._exit(0)
+
+    def _mark_update_failed(self) -> None:
+        try:
+            info = self.update_info or {}
+            UPDATE_FAILED_FILE.write_text(
+                json.dumps({"version": info.get("latest", ""), "ts": time.time()}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _update_failed_recently(self, latest: str) -> bool:
+        try:
+            if UPDATE_FAILED_FILE.exists():
+                d = json.loads(UPDATE_FAILED_FILE.read_text(encoding="utf-8"))
+                return d.get("version") == latest and time.time() - float(d.get("ts") or 0) < 6 * 3600
+        except Exception:
+            pass
+        return False
+
+    def _maybe_auto_update(self) -> None:
+        """发现新版本且已开启自动更新时，直接应用内更新并自动重启。"""
+        try:
+            if not self.config["settings"].get("auto_update", True):
+                return
+            info = self.update_info or {}
+            if not info.get("has_update") or not info.get("latest"):
+                return
+            if self._update_failed_recently(info["latest"]):
+                return
+            with self._update_lock:
+                phase = (self.update_job or {}).get("phase")
+                if phase in ("downloading", "installing", "restarting"):
+                    return
+            time.sleep(5)
+            self.notify("正在自动更新", f"发现新版本 v{info['latest']}，正在应用内更新并自动重启…")
+            self.start_update_install()
+        except Exception:
+            pass
 
     def _background_loop(self) -> None:
         """每 5 秒：本机目标端口健康检查；每 30 秒：流量落盘"""
@@ -1038,6 +1316,7 @@ class Manager:
                 "settings": dict(self.config["settings"]),
                 "tunnels": [rt.snapshot() for rt in self.runtimes.values()],
                 "update": self.update_info,
+                "update_job": dict(self.update_job) if self.update_job else None,
                 "tray": self.tray_available,
             }
 
@@ -1150,7 +1429,7 @@ class Manager:
                     self.config["settings"][key] = str(data[key]).strip()
                 elif key == "ui_port":
                     self.config["settings"][key] = max(1, min(65535, int(data[key])))
-                elif key in ("notify", "update_check", "proxy_check"):
+                elif key in ("notify", "update_check", "proxy_check", "auto_update"):
                     self.config["settings"][key] = bool(data[key])
                 elif key == "theme":
                     v = str(data[key])
@@ -1306,6 +1585,7 @@ def set_autostart(enabled: bool) -> bool:
 
 TRAFFIC_FILE = DATA_DIR / "traffic.json"
 UPDATE_CACHE_FILE = DATA_DIR / "update_check.json"
+UPDATE_FAILED_FILE = DATA_DIR / "update_failed.json"
 UPDATE_API = "https://api.github.com/repos/wuxinxin27/reverse-tunnel-manager/releases/latest"
 
 
@@ -1352,12 +1632,16 @@ def check_update(force: bool = False) -> dict:
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
         latest = str(data.get("tag_name", "")).lstrip("v")
-        want_ext = ".exe" if os.name == "nt" else (".dmg" if sys.platform == "darwin" else ".deb")
-        asset_url = ""
+        assets = []
         for a in data.get("assets", []) or []:
-            if str(a.get("name", "")).endswith(want_ext):
-                asset_url = a.get("browser_download_url", "")
-                break
+            assets.append({
+                "name": str(a.get("name", "")),
+                "url": a.get("browser_download_url", ""),
+                "size": int(a.get("size") or 0),
+            })
+        want_ext = ".exe" if os.name == "nt" else (".dmg" if sys.platform == "darwin" else ".deb")
+        asset_url = next((x["url"] for x in assets if x["name"].lower().endswith(want_ext)), "")
+        portable_url = next((x["url"] for x in assets if x["name"].lower().endswith(".tar.gz")), "")
         info = {
             "checked_at": now,
             "current": VERSION,
@@ -1365,6 +1649,8 @@ def check_update(force: bool = False) -> dict:
             "has_update": bool(latest) and _version_tuple(latest) > _version_tuple(VERSION),
             "url": data.get("html_url", ""),
             "asset_url": asset_url,
+            "portable_url": portable_url,
+            "assets": assets,
             "error": "",
         }
     except Exception as e:
@@ -1505,6 +1791,8 @@ class Handler(BaseHTTPRequestHandler):
                 info = check_update(force=bool(data.get("force", True)))
                 self.manager.update_info = info
                 return self._json(info)
+            if path == "/api/update_install":
+                return self._json(self.manager.start_update_install())
             if path == "/api/quit":
                 self.manager.stop_all()
                 if callable(self.shutdown_cb):

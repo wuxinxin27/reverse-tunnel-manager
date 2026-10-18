@@ -29,13 +29,13 @@ pyinstaller --noconfirm --clean --onefile --noconsole `
 然后安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php)，在仓库根目录执行：
 
 ```powershell
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.1.2 packaging\windows\installer.iss
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.1.3 packaging\windows\installer.iss
 ```
 
 产物：
 
 - `dist\ReverseTunnelManager.exe` —— 绿色单文件
-- `dist\ReverseTunnelManager-1.1.2-setup.exe` —— 安装包（开始菜单、可选桌面图标、可选开机自启）
+- `dist\ReverseTunnelManager-1.1.3-setup.exe` —— 安装包（开始菜单、可选桌面图标、可选开机自启）
 
 ## 说明
 

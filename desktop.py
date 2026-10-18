@@ -501,6 +501,7 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
     if owns:
         # 注意：类属性不能用 lambda（会被绑定成实例方法），用 partial
         httpd.RequestHandlerClass.shutdown_cb = functools.partial(GLib.idle_add, quit_all)
+        manager.on_quit_request = quit_all  # 应用内更新完成后由后端触发自动重启
         if hasattr(GLib, "unix_signal_add"):
             try:
                 GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, quit_all)
@@ -617,6 +618,7 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
             traceback.print_exc()  # 该 pywebview 版本不支持 minimized 事件时忽略
         if owns:
             httpd.RequestHandlerClass.shutdown_cb = functools.partial(quit_all)
+            manager.on_quit_request = quit_all  # 应用内更新完成后由后端触发自动重启
             start_enabled_async(manager)
 
         webview.start()  # 阻塞直到窗口关闭（主线程）
