@@ -16,6 +16,7 @@ const I18N = {
     "card.no_auto_reconnect": "未启用自动重连",
     "card.start": "▶ 启动", "card.stop": "■ 停止", "card.restart": "⟳ 重启",
     "card.edit": "✎ 编辑", "card.dup": "⧉ 复制", "card.del": "🗑 删除", "card.reset": "清零",
+    "card.ports": "🩺 端口",
     "card.reset_title": "清零这条隧道的流量统计（含图表与持久化记录）",
     "card.today": "今日", "card.total": "累计",
     "card.traffic_tip": "隧道总流量（上下行合计）；今日/累计为持久化统计（重启不丢），基于 ssh 进程 I/O",
@@ -91,6 +92,20 @@ const I18N = {
     "tray.unavailable": "⚠ 系统托盘不可用：关闭或最小化窗口将退出。详见 logs/desktop.log",
     "time.h": "{0} 小时 {1} 分", "time.m": "{0} 分 {1} 秒", "time.s": "{0} 秒",
     "ago.seconds": "{0} 秒前", "ago.minutes": "{0} 分钟前",
+    "ports.title": "远端端口体检",
+    "ports.refresh": "重新检测",
+    "ports.checking": "正在检测远端端口…",
+    "ports.free": "空闲",
+    "ports.busy": "被占用",
+    "ports.holder": "pid {0} · {1}",
+    "ports.no_pid": "无法确定占用进程（可能属于其他用户或容器）",
+    "ports.clean": "清理",
+    "ports.confirm_clean": "确定终止进程 {1}（它占用了远端端口 {0}）吗？",
+    "ports.cleaned": "端口 {0} 已释放",
+    "ports.clean_failed": "清理失败：{0}",
+    "ports.check_failed": "检测失败：{0}",
+    "ports.none": "该隧道没有配置转发端口",
+    "ports.hint": "占用多来自遗留的 SSH 会话（例如另一台机器上的旧隧道脚本）。「清理」会终止占用进程，请确认后再操作。",
   },
   en: {
     "app.title": "Reverse Tunnel Manager",
@@ -105,6 +120,7 @@ const I18N = {
     "card.no_auto_reconnect": "auto-reconnect off",
     "card.start": "▶ Start", "card.stop": "■ Stop", "card.restart": "⟳ Restart",
     "card.edit": "✎ Edit", "card.dup": "⧉ Duplicate", "card.del": "🗑 Delete", "card.reset": "Reset",
+    "card.ports": "🩺 Ports",
     "card.reset_title": "Reset traffic stats for this tunnel (chart and persisted totals)",
     "card.today": "Today", "card.total": "Total",
     "card.traffic_tip": "Total traffic (up+down). Today/Total are persisted across restarts; measured from the ssh process I/O",
@@ -180,6 +196,20 @@ const I18N = {
     "tray.unavailable": "⚠ System tray unavailable: closing or minimizing will quit. See logs/desktop.log",
     "time.h": "{0}h {1}m", "time.m": "{0}m {1}s", "time.s": "{0}s",
     "ago.seconds": "{0}s ago", "ago.minutes": "{0}m ago",
+    "ports.title": "Remote port check",
+    "ports.refresh": "Re-check",
+    "ports.checking": "Checking remote ports…",
+    "ports.free": "free",
+    "ports.busy": "in use",
+    "ports.holder": "pid {0} · {1}",
+    "ports.no_pid": "Cannot identify the holding process (other user or container)",
+    "ports.clean": "Clean up",
+    "ports.confirm_clean": "Terminate process {1} holding remote port {0}?",
+    "ports.cleaned": "Port {0} freed",
+    "ports.clean_failed": "Cleanup failed: {0}",
+    "ports.check_failed": "Check failed: {0}",
+    "ports.none": "This tunnel has no forwarding ports",
+    "ports.hint": "The port is usually held by a leftover SSH session (e.g. an old tunnel script on another machine). Cleanup terminates the holding process; confirm before proceeding.",
   },
 };
 
@@ -319,6 +349,7 @@ const S = {
   updateJob: null,
   updateFailShown: "",
   trayWarnShown: false,
+  portsTunnelId: null,
 };
 
 /* ================= 状态轮询与渲染 ================= */
@@ -522,6 +553,7 @@ function renderCard(x) {
   if (active) actions.appendChild(mkBtn(t("card.stop"), "", () => act(x.id, "stop")));
   else actions.appendChild(mkBtn(t("card.start"), "primary", () => act(x.id, "start")));
   if (active) actions.appendChild(mkBtn(t("card.restart"), "", () => act(x.id, "restart")));
+  actions.appendChild(mkBtn(t("card.ports"), "", () => openPortCheck(x)));
   actions.appendChild(mkBtn(t("card.edit"), "", () => openEditor(x)));
   actions.appendChild(mkBtn(t("card.dup"), "", () => act(x.id, "duplicate")));
   actions.appendChild(mkBtn(t("card.del"), "danger", () => removeTunnel(x)));
@@ -549,6 +581,76 @@ async function removeTunnel(x) {
   } catch (e) {
     toast(e.message, "error");
   }
+}
+
+/* ================= 远端端口体检 ================= */
+
+async function openPortCheck(x) {
+  S.portsTunnelId = x.id;
+  const body = $("#ports-body");
+  body.textContent = "";
+  body.appendChild(el("div", "hint", t("ports.checking")));
+  $("#ports").classList.remove("hidden");
+  await refreshPortCheck();
+}
+
+async function refreshPortCheck() {
+  const tid = S.portsTunnelId;
+  if (!tid) return;
+  const body = $("#ports-body");
+  try {
+    const r = await api(`/api/tunnels/${tid}/port_check`, { method: "POST", body: "{}" });
+    if (tid !== S.portsTunnelId) return;
+    body.textContent = "";
+    if (!r.ok) {
+      body.appendChild(el("div", "card-detail error", t("ports.check_failed", r.error || "SSH")));
+      return;
+    }
+    const entries = Object.entries(r.ports || {});
+    if (!entries.length) {
+      body.appendChild(el("div", "hint", t("ports.none")));
+      return;
+    }
+    for (const [port, info] of entries) {
+      const row = el("div", "port-row");
+      row.appendChild(el("span", "chip", port));
+      if (info.state === "free") {
+        row.appendChild(el("span", "port-free", t("ports.free")));
+      } else {
+        row.appendChild(el("span", "port-busy", t("ports.busy")));
+        if (info.pid) {
+          const desc = String(info.args || info.comm || "").trim();
+          row.appendChild(el("span", "port-holder", t("ports.holder", info.pid, desc)));
+          const btn = el("button", "btn tiny danger", t("ports.clean"));
+          btn.addEventListener("click", () => cleanPort(port, info.pid));
+          row.appendChild(btn);
+        } else {
+          row.appendChild(el("span", "port-holder", t("ports.no_pid")));
+        }
+      }
+      body.appendChild(row);
+    }
+  } catch (e) {
+    if (tid === S.portsTunnelId) {
+      body.textContent = "";
+      body.appendChild(el("div", "card-detail error", t("ports.check_failed", e.message)));
+    }
+  }
+}
+
+async function cleanPort(port, pid) {
+  if (!confirm(t("ports.confirm_clean", port, pid))) return;
+  try {
+    const r = await api(`/api/tunnels/${S.portsTunnelId}/port_clean`, {
+      method: "POST",
+      body: JSON.stringify({ port: parseInt(port, 10), pid: parseInt(pid, 10) }),
+    });
+    if (r.ok) toast(t("ports.cleaned", port), "success");
+    else toast(t("ports.clean_failed", r.error || ""), "error");
+  } catch (e) {
+    toast(t("ports.clean_failed", e.message), "error");
+  }
+  await refreshPortCheck();
 }
 
 /* ================= 日志 ================= */
@@ -923,10 +1025,14 @@ function bind() {
     $("#logview").textContent = "";
   });
 
+  $("#btn-ports-close").addEventListener("click", () => $("#ports").classList.add("hidden"));
+  $("#btn-ports-refresh").addEventListener("click", refreshPortCheck);
+
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") {
       closeEditor();
       $("#settings").classList.add("hidden");
+      $("#ports").classList.add("hidden");
     }
   });
 }

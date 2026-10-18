@@ -193,6 +193,19 @@
   </div>
 </div>
 
+<!-- 远端端口体检 -->
+<div id="ports" class="modal hidden">
+  <div class="dialog narrow">
+    <h2 data-i18n="ports.title">远端端口体检</h2>
+    <div id="ports-body"></div>
+    <p class="hint" data-i18n="ports.hint">占用多来自遗留的 SSH 会话（例如另一台机器上的旧隧道脚本）。「清理」会终止占用进程，请确认后再操作。</p>
+    <div class="dialog-actions">
+      <button class="btn" id="btn-ports-refresh" data-i18n="ports.refresh">重新检测</button>
+      <button class="btn" id="btn-ports-close" data-i18n="btn.close">关闭</button>
+    </div>
+  </div>
+</div>
+
 <div id="toasts"></div>
 <div id="offline" class="hidden" data-i18n="offline">与工具后端失去连接 —— 如果工具已退出，请重新运行 app.py</div>
 

@@ -159,6 +159,13 @@ def _setup_logging(core) -> None:
         pass
 
 
+def _has_display() -> bool:
+    """当前环境是否有图形显示（GTK 在无显示时可能直接退出进程，必须提前判断）"""
+    if os.name == "nt" or sys.platform == "darwin":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def _fmt_bytes(n) -> str:
     try:
         v = float(n)
@@ -198,22 +205,65 @@ def _tray_lang(manager) -> str:
     return "zh" if sys_lang.lower().startswith("zh") else "en"
 
 
-def _create_tray_win32(window, manager, quit_cb):
-    """Windows 系统托盘（pystray；打包版已内置）。不可用时返回 None。"""
+def _load_tray_deps():
+    """返回 (pystray 模块, 托盘图像)；不可用时 (None, None)。"""
     try:
         import pystray
         from PIL import Image
     except Exception:
         traceback.print_exc()
         print("[tray] 无法导入 pystray / Pillow，系统托盘不可用")
-        return None
+        return None, None
     icon_png = ICON.parent / "icon.png"
     try:
         image = Image.open(str(icon_png if icon_png.exists() else ICON))
         image.load()
+        return pystray, image
     except Exception:
         traceback.print_exc()
         print("[tray] 无法加载托盘图标文件")
+        return None, None
+
+
+def _spawn_ui() -> None:
+    """从后台/托盘启动一个界面窗口（连接正在运行的实例）。"""
+    try:
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable]
+        else:
+            cmd = [sys.executable, str(APP_DIR / "desktop.py")]
+        kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL, close_fds=True)
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(cmd, **kwargs)
+    except Exception:
+        traceback.print_exc()
+
+
+def _start_tray_title_loop(icon, manager) -> None:
+    """托盘悬浮标题：显示实时总速率与运行数量。"""
+    def loop():
+        while True:
+            try:
+                snaps = manager.state()["tunnels"]
+                rate = sum(int(x.get("rate") or 0) for x in snaps)
+                running = sum(1 for x in snaps if x["state"] == "running")
+                L = _TRAY_LABELS[_tray_lang(manager)]
+                icon.title = f'{L["title"]} — ⇅ {_fmt_bytes(rate)}/s · {running} {L["running"]}'
+            except Exception:
+                pass
+            time.sleep(3)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def _create_tray_win32(window, manager, quit_cb):
+    """Windows 系统托盘（pystray；打包版已内置）。不可用时返回 None。"""
+    pystray, image = _load_tray_deps()
+    if pystray is None:
         return None
 
     L = _TRAY_LABELS[_tray_lang(manager)]
@@ -267,31 +317,139 @@ def _create_tray_win32(window, manager, quit_cb):
     try:
         menu = pystray.Menu(build_menu)
         icon = pystray.Icon("reverse-tunnel-manager", image, L["title"], menu)
-        threading.Thread(target=icon.run, daemon=True).start()
     except Exception:
         traceback.print_exc()
         print("[tray] pystray 初始化失败")
         return None
 
-    def _title_loop():
-        while True:
-            try:
-                snaps = manager.state()["tunnels"]
-                rate = sum(int(x.get("rate") or 0) for x in snaps)
-                running = sum(1 for x in snaps if x["state"] == "running")
-                icon.title = f'{L["title"]} — ⇅ {_fmt_bytes(rate)}/s · {running} {L["running"]}'
-            except Exception:
-                pass
-            time.sleep(3)
+    def _run_icon():
+        try:
+            icon.run()
+        except Exception:
+            traceback.print_exc()
+            print("[tray] 托盘事件循环异常退出，系统托盘不可用")
+            manager.tray_available = False
 
-    threading.Thread(target=_title_loop, daemon=True).start()
+    threading.Thread(target=_run_icon, daemon=True).start()
+    _start_tray_title_loop(icon, manager)
     return icon
+
+
+def _create_tray_win32_headless(manager, quit_cb):
+    """后台模式（无窗口）的 Windows 托盘。"""
+    pystray, image = _load_tray_deps()
+    if pystray is None:
+        return None
+    L = _TRAY_LABELS[_tray_lang(manager)]
+
+    def _toggle(icon, item, tid, running):
+        try:
+            if running:
+                manager.stop(tid)
+            else:
+                manager.start(tid)
+        except Exception:
+            traceback.print_exc()
+
+    def build_menu(*_args):
+        items = []
+        try:
+            snaps = manager.state()["tunnels"]
+        except Exception:
+            snaps = []
+        for snap in snaps:
+            running = snap["state"] == "running"
+            label = ("● " if running else "○ ") + str(snap.get("name") or "")
+            items.append(pystray.MenuItem(
+                label,
+                lambda icon, item, _t=snap["id"], _r=running: _toggle(icon, item, _t, _r),
+            ))
+        if items:
+            items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem(L["show"], lambda icon, item: _spawn_ui(), default=True))
+        items.append(pystray.MenuItem(
+            L["start_all"], lambda icon, item: threading.Thread(target=manager.start_all, daemon=True).start()))
+        items.append(pystray.MenuItem(
+            L["stop_all"], lambda icon, item: threading.Thread(target=manager.stop_all, daemon=True).start()))
+        items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem(L["quit"], lambda icon, item: quit_cb()))
+        return items
+
+    try:
+        icon = pystray.Icon("reverse-tunnel-manager", image, L["title"], pystray.Menu(build_menu))
+        return icon
+    except Exception:
+        traceback.print_exc()
+        print("[tray] 后台托盘初始化失败")
+        return None
+
+
+def _run_background_win32(manager, httpd) -> int | None:
+    """Windows 后台模式：无窗口 + 托盘（开机自启用）。托盘不可用时返回 None。"""
+    stop_event = threading.Event()
+
+    def quit_all(*_):
+        if stop_event.is_set():
+            return
+        stop_event.set()
+
+        def work():
+            try:
+                manager.stop_all()
+            finally:
+                try:
+                    httpd.shutdown()
+                except Exception:
+                    pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    icon = _create_tray_win32_headless(manager, quit_all)
+    if icon is None:
+        return None
+
+    def _run_icon():
+        try:
+            icon.run()
+        except Exception:
+            traceback.print_exc()
+            print("[tray] 后台托盘事件循环异常退出")
+            manager.tray_available = False
+
+    threading.Thread(target=_run_icon, daemon=True).start()
+    _start_tray_title_loop(icon, manager)
+    manager.tray_available = True
+    httpd.RequestHandlerClass.shutdown_cb = functools.partial(quit_all)
+    for sig_name in ("SIGINT", "SIGTERM"):
+        try:
+            signal.signal(getattr(signal, sig_name), lambda *_: quit_all())
+        except (ValueError, AttributeError, OSError):
+            pass
+    print("后台模式：系统托盘已启用（可在右下角找到图标）")
+    try:
+        while not stop_event.wait(1):
+            pass
+    except KeyboardInterrupt:
+        pass
+    manager.stop_all()
+    try:
+        httpd.shutdown()
+    except Exception:
+        pass
+    try:
+        icon.stop()
+    except Exception:
+        pass
+    return 0
 
 
 # ---------------------------------------------------------------- Linux：GTK + WebKit2
 
 def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
     """Linux 原生窗口。GTK/WebKit2 不可用时返回 None。"""
+    if not _has_display():
+        print("[提示] 无图形显示环境（DISPLAY/WAYLAND_DISPLAY 未设置），跳过 GTK 窗口。")
+        return None
     try:
         import gi
         gi.require_version("Gtk", "3.0")
@@ -522,6 +680,124 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
     return 0
 
 
+# ---------------------------------------------------------------- Linux 后台托盘
+
+def _run_background_gtk(manager, httpd) -> int | None:
+    """Linux 后台模式：无窗口，仅顶栏托盘（AppIndicator）。不可用时返回 None。"""
+    if not _has_display():
+        return None
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        AppIndicator = _load_appindicator()
+        if AppIndicator is None:
+            return None
+        from gi.repository import GLib, Gtk
+    except Exception:
+        return None
+    try:
+        Gtk.init(None)
+        L = _TRAY_LABELS[_tray_lang(manager)]
+        indicator = AppIndicator.Indicator.new(
+            "reverse-tunnel-manager",
+            _tray_icon_file(),
+            AppIndicator.IndicatorCategory.APPLICATION_STATUS,
+        )
+        indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        indicator.set_title(L["title"])
+        state = {"quitting": False, "sig": None}
+
+        def quit_all(*_):
+            if state["quitting"]:
+                return False
+            state["quitting"] = True
+
+            def work():
+                try:
+                    manager.stop_all()
+                finally:
+                    try:
+                        httpd.shutdown()
+                    except Exception:
+                        pass
+                    try:
+                        indicator.set_status(AppIndicator.IndicatorStatus.PASSIVE)
+                    except Exception:
+                        pass
+                    GLib.idle_add(Gtk.main_quit)
+
+            threading.Thread(target=work, daemon=True).start()
+            return False
+
+        def _menu_item(label, cb):
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", lambda *_: cb())
+            return item
+
+        def _run_bg(fn, *args):
+            threading.Thread(target=fn, args=args, daemon=True).start()
+
+        def _rebuild():
+            try:
+                snaps = manager.state()["tunnels"]
+            except Exception:
+                snaps = []
+            m = Gtk.Menu()
+            for snap in snaps:
+                running = snap["state"] == "running"
+                label = ("● " if running else "○ ") + str(snap.get("name") or "")
+                tid = snap["id"]
+                if running:
+                    m.append(_menu_item(label, lambda _t=tid: _run_bg(manager.stop, _t)))
+                else:
+                    m.append(_menu_item(label, lambda _t=tid: _run_bg(manager.start, _t)))
+            if snaps:
+                m.append(Gtk.SeparatorMenuItem())
+            m.append(_menu_item(L["show"], _spawn_ui))
+            m.append(_menu_item(L["start_all"], lambda: _run_bg(manager.start_all)))
+            m.append(_menu_item(L["stop_all"], lambda: _run_bg(manager.stop_all)))
+            m.append(Gtk.SeparatorMenuItem())
+            m.append(_menu_item(L["quit"], lambda: quit_all()))
+            m.show_all()
+            indicator.set_menu(m)
+
+        def _tick():
+            try:
+                snaps = manager.state()["tunnels"]
+                running = sum(1 for s in snaps if s["state"] == "running")
+                rate = sum(int(s.get("rate") or 0) for s in snaps)
+                indicator.set_title(f'{L["title"]} — ⇅ {_fmt_bytes(rate)}/s · {running} {L["running"]}')
+                sig = "|".join(f'{s["id"]}:{s["state"]}:{s["name"]}' for s in snaps)
+                if sig != state["sig"]:
+                    state["sig"] = sig
+                    _rebuild()
+            except Exception:
+                traceback.print_exc()
+            return True
+
+        _rebuild()
+        GLib.timeout_add_seconds(3, _tick)
+        httpd.RequestHandlerClass.shutdown_cb = functools.partial(GLib.idle_add, quit_all)
+        if hasattr(GLib, "unix_signal_add"):
+            try:
+                GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, quit_all)
+                GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, quit_all)
+            except Exception:
+                pass
+        manager.tray_available = True
+        print("后台模式：系统托盘已启用（顶栏图标）")
+        Gtk.main()
+        manager.stop_all()
+        try:
+            httpd.server_close()
+        except Exception:
+            pass
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
 # ---------------------------------------------------------------- Windows：WebView2（pywebview）
 
 def run_webview_window(url, owns, manager, httpd, core) -> int | None:
@@ -737,6 +1013,19 @@ def main() -> int:
         if not owns:
             print("已有实例在运行，无需重复启动。")
             return 0
+        start_enabled_async(manager)
+        # 优先以“托盘 + 后台”方式运行（Windows pystray / Linux AppIndicator）
+        rc = None
+        try:
+            if sys.platform == "win32":
+                rc = _run_background_win32(manager, httpd)
+            elif os.name != "nt" and sys.platform != "darwin":
+                rc = _run_background_gtk(manager, httpd)
+        except Exception:
+            traceback.print_exc()
+        if rc is not None:
+            return rc
+        # 纯后台兜底（无托盘）
         stop_event = threading.Event()
         httpd.RequestHandlerClass.shutdown_cb = functools.partial(stop_event.set)
         for sig_name in ("SIGINT", "SIGTERM"):
@@ -746,7 +1035,6 @@ def main() -> int:
                 pass
         print(f"反向隧道管理器已在后台运行：{url}")
         print("（在 Web 界面点「退出工具」，或按 Ctrl+C / 关掉进程来停止）")
-        start_enabled_async(manager)
         try:
             while not stop_event.wait(1):
                 pass

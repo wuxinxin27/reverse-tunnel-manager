@@ -168,6 +168,19 @@ main {
   color: var(--muted);
   margin-top: 2px;
 }
+
+/* ---------- 远端端口体检 ---------- */
+
+.port-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  flex-wrap: wrap;
+}
+.port-free { color: var(--green); font-size: 13px; }
+.port-busy { color: var(--red); font-size: 13px; }
+.port-holder { color: var(--muted); font-size: 12px; word-break: break-all; }
 .card-detail { margin-top: 6px; font-size: 12.5px; color: var(--orange); word-break: break-all; }
 .card-detail.error { color: var(--red); }
 .card-note { margin-top: 4px; font-size: 12px; color: var(--muted); }

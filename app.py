@@ -50,7 +50,7 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 ICON_FILE = APP_DIR / "assets" / "icon.svg"
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 
 
 def _base_dir(kind: str) -> Path:
@@ -345,7 +345,8 @@ def resolve_alias(alias: str) -> dict:
 
 
 def build_ssh_command(tunnel: dict, extra_args: list[str] | None = None,
-                      for_probe: bool = False, probe_ports: list[int] | None = None) -> list[str]:
+                      for_probe: bool = False, probe_ports: list[int] | None = None,
+                      remote_script: str | None = None) -> list[str]:
     """构建 ssh 命令行。for_probe=True 时不建立转发，而是执行远端探测脚本。"""
     mode = tunnel.get("mode", "custom")
     args = ["ssh"]
@@ -416,15 +417,18 @@ def build_ssh_command(tunnel: dict, extra_args: list[str] | None = None,
     args += [target]
 
     if for_probe:
-        ports = " ".join(str(p) for p in (probe_ports or []))
-        script = "echo __OK__"
-        if ports:
-            script += (
-                f"; for p in {ports}; do "
-                "if (ss -ltn 2>/dev/null || netstat -tln 2>/dev/null) | grep -q \":$p \"; "
-                "then echo \"__PORT_BUSY__ $p\"; else echo \"__PORT_FREE__ $p\"; fi; done"
-            )
-        args += [script]
+        if remote_script is not None:
+            args += [remote_script]
+        else:
+            ports = " ".join(str(p) for p in (probe_ports or []))
+            script = "echo __OK__"
+            if ports:
+                script += (
+                    f"; for p in {ports}; do h=$(printf '%04X' \"$p\"); "
+                    "if grep -h -i \":$h \" /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -q \" 0A \"; "
+                    "then echo \"__PORT_BUSY__ $p\"; else echo \"__PORT_FREE__ $p\"; fi; done"
+                )
+            args += [script]
     return args
 
 
@@ -467,6 +471,273 @@ def probe_tunnel(tunnel: dict, extra_args: list[str]) -> dict:
             break
     result["error"] = reason
     return result
+
+
+def probe_remote_ports(tunnel: dict, extra_args: list[str], ports: list[int]) -> dict:
+    """远端端口体检：返回 {ok, error, ports: {port: {state, pid, comm, args}}}"""
+    script = _port_report_script(ports)
+    try:
+        cmd = build_ssh_command(tunnel, extra_args=extra_args, for_probe=True, remote_script=script)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e), "ports": {}}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                              **_no_window_run_kwargs())
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "检测超时（60 秒）", "ports": {}}
+
+    output = (proc.stdout or "") + (proc.stderr or "")
+    result: dict = {"ok": False, "error": "", "ports": {}}
+    for line in output.splitlines():
+        s = line.strip()
+        if s == "__OK__":
+            result["ok"] = True
+        elif s.startswith("__FREE__ "):
+            result["ports"][s.split()[-1]] = {"state": "free"}
+        elif s.startswith("__BUSY__ "):
+            parts = s[len("__BUSY__ "):].split("|")
+            port = parts[0].strip()
+            result["ports"][port] = {
+                "state": "busy",
+                "pid": parts[1].strip() if len(parts) > 1 else "",
+                "comm": parts[2].strip() if len(parts) > 2 else "",
+                "args": parts[3].strip() if len(parts) > 3 else "",
+            }
+    if not result["ok"]:
+        reason = "SSH 连接失败"
+        for line in output.splitlines():
+            hit = analyze_ssh_line(line)
+            if hit:
+                reason = hit[0]
+                break
+        result["error"] = reason
+    return result
+
+
+def clean_remote_port(tunnel: dict, extra_args: list[str], port: int, pid: int) -> dict:
+    """清理远端端口占用：仅当该进程确实监听该端口时才终止（先 TERM，必要时 KILL）。"""
+    script = _port_clean_script(port, pid)
+    try:
+        cmd = build_ssh_command(tunnel, extra_args=extra_args, for_probe=True, remote_script=script)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                              **_no_window_run_kwargs())
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "清理超时（60 秒）"}
+
+    output = (proc.stdout or "") + (proc.stderr or "")
+    result = {"ok": False, "error": "", "port": port, "pid": pid}
+    for line in output.splitlines():
+        s = line.strip()
+        if s == "__OK__":
+            continue
+        if s.startswith("__FREED__"):
+            result["ok"] = True
+        elif s.startswith("__STILL_BUSY__"):
+            result["error"] = f"端口 {port} 仍被占用"
+        elif s.startswith("__REJECT__"):
+            result["error"] = s[len("__REJECT__ "):]
+    if not result["ok"] and not result["error"]:
+        result["error"] = "清理失败（无法确认结果）"
+    return result
+
+
+_PY_PORT_REPORT = """
+import os, sys
+ports = [int(x) for x in sys.argv[1:]]
+def inodes_by_port():
+    res = {}
+    for proto in ("tcp", "tcp6"):
+        try:
+            lines = open("/proc/net/" + proto).read().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            f = line.split()
+            if len(f) < 10 or f[3] != "0A":
+                continue
+            try:
+                port = int(f[1].rsplit(":", 1)[1], 16)
+            except ValueError:
+                continue
+            res.setdefault(port, []).append(f[9])
+    return res
+def pid_for(inode):
+    target = "socket:[" + inode + "]"
+    try:
+        pids = [d for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        return None
+    for pd in pids:
+        try:
+            fds = os.listdir("/proc/" + pd + "/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink("/proc/" + pd + "/fd/" + fd) == target:
+                    return int(pd)
+            except OSError:
+                continue
+    return None
+table = inodes_by_port()
+print("__OK__")
+for p in ports:
+    if p not in table:
+        print("__FREE__ " + str(p))
+        continue
+    pid = None
+    for ino in table[p]:
+        pid = pid_for(ino)
+        if pid:
+            break
+    comm = ""
+    args = ""
+    if pid:
+        try:
+            comm = open("/proc/" + str(pid) + "/comm").read().strip()[:60]
+        except OSError:
+            pass
+        try:
+            args = open("/proc/" + str(pid) + "/cmdline").read().replace("\\x00", " ").strip()[:120]
+        except OSError:
+            pass
+    print("__BUSY__ " + str(p) + "|" + (str(pid) if pid else "") + "|" + comm + "|" + args)
+"""
+
+_PY_PORT_CLEAN = """
+import os, signal, sys, time
+pid = int(sys.argv[1])
+port = int(sys.argv[2])
+def listen_inodes(p):
+    inos = []
+    for proto in ("tcp", "tcp6"):
+        try:
+            lines = open("/proc/net/" + proto).read().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            f = line.split()
+            if len(f) < 10 or f[3] != "0A":
+                continue
+            try:
+                if int(f[1].rsplit(":", 1)[1], 16) == p:
+                    inos.append(f[9])
+            except ValueError:
+                continue
+    return inos
+def holds(p, inos):
+    targets = {"socket:[" + i + "]" for i in inos}
+    try:
+        fds = os.listdir("/proc/" + str(p) + "/fd")
+    except OSError:
+        return False
+    for fd in fds:
+        try:
+            if os.readlink("/proc/" + str(p) + "/fd/" + fd) in targets:
+                return True
+        except OSError:
+            continue
+    return False
+inos = listen_inodes(port)
+if not inos or not holds(pid, inos):
+    print("__REJECT__ 进程 " + str(pid) + " 未监听端口 " + str(port) + "，已取消")
+    sys.exit(0)
+try:
+    os.kill(pid, signal.SIGTERM)
+except OSError:
+    pass
+time.sleep(1)
+if listen_inodes(port):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    time.sleep(1)
+if listen_inodes(port):
+    print("__STILL_BUSY__ " + str(port))
+else:
+    print("__FREED__ " + str(port))
+"""
+
+_SH_PORT_REPORT = (
+    "echo __OK__\n"
+    "ports=\"$*\"\n"
+    "for p in $ports; do\n"
+    "  hex=$(printf '%04X' \"$p\")\n"
+    "  line=$(grep -h -i \":$hex \" /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep \" 0A \" | head -1)\n"
+    "  if [ -z \"$line\" ]; then echo \"__FREE__ $p\"; continue; fi\n"
+    "  set -- $line\n"
+    "  inode=${10}\n"
+    "  pid=\"\"\n"
+    "  for pd in /proc/[0-9]*; do\n"
+    "    for fd in \"$pd\"/fd/*; do\n"
+    "      if [ \"$(readlink \"$fd\" 2>/dev/null)\" = \"socket:[$inode]\" ]; then pid=${pd#/proc/}; break 2; fi\n"
+    "    done\n"
+    "  done\n"
+    "  comm=\"\"; args=\"\"\n"
+    "  if [ -n \"$pid\" ]; then\n"
+    "    [ -r \"/proc/$pid/comm\" ] && comm=$(tr -d '\\n' < \"/proc/$pid/comm\" | head -c 60)\n"
+    "    [ -r \"/proc/$pid/cmdline\" ] && args=$(tr '\\0' ' ' < \"/proc/$pid/cmdline\" | head -c 120)\n"
+    "  fi\n"
+    "  echo \"__BUSY__ $p|$pid|$comm|$args\"\n"
+    "done\n"
+)
+
+_SH_PORT_CLEAN = (
+    "p=$1\n"
+    "port=$2\n"
+    "hex=$(printf '%04X' \"$port\")\n"
+    "line=$(grep -h -i \":$hex \" /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep \" 0A \" | head -1)\n"
+    "set -- $line\n"
+    "inode=${10}\n"
+    "owns=0\n"
+    "if [ -n \"$inode\" ]; then\n"
+    "  for fd in /proc/\"$p\"/fd/*; do\n"
+    "    if [ \"$(readlink \"$fd\" 2>/dev/null)\" = \"socket:[$inode]\" ]; then owns=1; break; fi\n"
+    "  done\n"
+    "fi\n"
+    "if [ \"$owns\" = \"0\" ]; then echo \"__REJECT__ 进程 $p 未监听端口 $port，已取消\"; exit 0; fi\n"
+    "kill -TERM \"$p\" 2>/dev/null\n"
+    "sleep 1\n"
+    "if [ -n \"$(grep -h -i \":$hex \" /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep \" 0A \" | head -1)\" ]; then\n"
+    "  kill -9 \"$p\" 2>/dev/null\n"
+    "  sleep 1\n"
+    "fi\n"
+    "if [ -n \"$(grep -h -i \":$hex \" /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep \" 0A \" | head -1)\" ]; then\n"
+    "  echo \"__STILL_BUSY__ $port\"\n"
+    "else\n"
+    "  echo \"__FREED__ $port\"\n"
+    "fi\n"
+)
+
+
+def _sh_quote(s: str) -> str:
+    """把一段脚本安全地嵌入单引号 shell 字符串中"""
+    return s.replace("'", "'\\''")
+
+
+def _port_report_script(ports: list[int]) -> str:
+    plist = " ".join(str(int(p)) for p in ports)
+    return (
+        "if command -v python3 >/dev/null 2>&1; then\n"
+        "  python3 -c '" + _PY_PORT_REPORT.strip() + "' " + plist + "\n"
+        "else\n"
+        "  sh -c '" + _sh_quote(_SH_PORT_REPORT) + "' rtm " + plist + "\n"
+        "fi\n"
+    )
+
+
+def _port_clean_script(port: int, pid: int) -> str:
+    return (
+        "if command -v python3 >/dev/null 2>&1; then\n"
+        "  python3 -c '" + _PY_PORT_CLEAN.strip() + "' " + str(int(pid)) + " " + str(int(port)) + "\n"
+        "else\n"
+        "  sh -c '" + _sh_quote(_SH_PORT_CLEAN) + "' rtm " + str(int(pid)) + " " + str(int(port)) + "\n"
+        "fi\n"
+    )
 
 
 # ---------------------------------------------------------------- 隧道运行时
@@ -1001,6 +1272,12 @@ class Manager:
         threading.Thread(target=self._update_worker, args=(url, ext, name), daemon=True).start()
         return job
 
+    def _clear_update_cache(self) -> None:
+        try:
+            UPDATE_CACHE_FILE.unlink()
+        except OSError:
+            pass
+
     def _update_worker(self, url: str, ext: str, name: str) -> None:
         try:
             work = DATA_DIR / "update"
@@ -1010,6 +1287,7 @@ class Manager:
             self._update_progress(phase="downloading", percent=0, message="正在下载…")
             self._download(url, dest)
             self._update_progress(phase="installing", percent=100, message="正在安装…")
+            self._clear_update_cache()  # 更新成功后强制重新检查，避免旧缓存让更新按钮残留
             if os.name == "nt":
                 self._apply_windows(dest)
             elif sys.platform == "darwin":
@@ -1390,6 +1668,19 @@ class Manager:
     def reset_traffic(self, tid: str) -> None:
         self._find(tid).reset_traffic()
 
+    # ---- 远端端口体检 / 清理 ----
+
+    def port_check(self, tid: str) -> dict:
+        rt = self._find(tid)
+        ports = [int(r["remote_port"]) for r in rt.tunnel.get("rules") or []]
+        return probe_remote_ports(rt.tunnel, self.extra_ssh_args(), ports)
+
+    def port_clean(self, tid: str, port: int, pid: int) -> dict:
+        rt = self._find(tid)
+        if not (1 <= port <= 65535) or pid <= 0:
+            raise ValueError("端口或进程号不合法")
+        return clean_remote_port(rt.tunnel, self.extra_ssh_args(), port, pid)
+
     def restart(self, tid: str) -> dict:
         rt = self._find(tid)
         err = rt.restart()
@@ -1623,6 +1914,10 @@ def check_update(force: bool = False) -> dict:
     except Exception:
         cached = None
     if not force and cached and now - float(cached.get("checked_at") or 0) < 6 * 3600:
+        cached = dict(cached)
+        latest_c = str(cached.get("latest") or "")
+        cached["current"] = VERSION
+        cached["has_update"] = bool(latest_c) and _version_tuple(latest_c) > _version_tuple(VERSION)
         return cached
     try:
         req = urllib.request.Request(UPDATE_API, headers={
@@ -1799,7 +2094,7 @@ class Handler(BaseHTTPRequestHandler):
                     threading.Timer(0.3, self.shutdown_cb).start()
                 return self._json({"ok": True})
 
-            m = re.fullmatch(r"/api/tunnels/([0-9a-f]+)/(start|stop|restart|duplicate|traffic_reset)", path)
+            m = re.fullmatch(r"/api/tunnels/([0-9a-f]+)/(start|stop|restart|duplicate|traffic_reset|port_check|port_clean)", path)
             if m:
                 tid, action = m.group(1), m.group(2)
                 if action == "start":
@@ -1813,6 +2108,11 @@ class Handler(BaseHTTPRequestHandler):
                 if action == "traffic_reset":
                     self.manager.reset_traffic(tid)
                     return self._json({"ok": True})
+                if action == "port_check":
+                    return self._json(self.manager.port_check(tid))
+                if action == "port_clean":
+                    return self._json(self.manager.port_clean(
+                        tid, int(data.get("port") or 0), int(data.get("pid") or 0)))
             return self._error("未知路径", 404)
         except KeyError:
             return self._error("隧道不存在", 404)
