@@ -16,8 +16,14 @@ import sys
 import time
 
 if os.name != "nt":
-    print("SKIP: 本实验只针对 Windows")
+    print("SKIP: this probe targets Windows only")
     sys.exit(0)
+
+try:  # Windows CI 控制台可能是 cp1252，强制 UTF-8 以免打印崩溃
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 sys.path.insert(0, ".")
 import app  # noqa: E402  仓库中的现有实现
@@ -87,17 +93,17 @@ def main():
     p.wait(timeout=20)
     fin = app.read_process_io(p.pid)
     fin2 = io_fixed(p.pid)
-    print("loopback 收到:", total)
-    print("app 实现      : base =", base, " final =", fin)
-    print("显式 argtypes : base =", base2, " final =", fin2)
+    print("loopback received:", total)
+    print("app impl      : base =", base, " final =", fin)
+    print("explicit args : base =", base2, " final =", fin2)
 
     def verdict(tag, a, b):
         if not a or not b:
-            print(f"VERDICT[{tag}]: 读取失败（None）")
+            print(f"VERDICT[{tag}]: READ-FAILED (None)")
             return
         dw = b[1] - a[1]
         dr = b[0] - a[0]
-        ok = "OK 含套接字" if dw >= total * 0.8 else "NOT-INCLUDED 不含套接字"
+        ok = "INCLUDED (sockets counted)" if dw >= total * 0.8 else "NOT-INCLUDED (sockets not counted)"
         print(f"VERDICT[{tag}]: delta_read={dr} delta_write={dw} -> {ok}")
 
     verdict("app", base, fin)
