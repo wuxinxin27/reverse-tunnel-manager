@@ -1266,7 +1266,7 @@ class Manager:
         url, ext, name = self._select_update_asset()
         if not url:
             raise RuntimeError("没有找到适合当前平台的安装包")
-        if not url.startswith("https://github.com/wuxinxin27/reverse-tunnel-manager/"):
+        if not any(url.startswith(p) for p in UPDATE_TRUST_PREFIXES):
             raise RuntimeError("安装包地址不受信任，已取消")
         with self._update_lock:
             self.update_job = {"phase": "downloading", "percent": 0, "message": "正在下载…",
@@ -1355,7 +1355,7 @@ class Manager:
         safe_target = str(target)
         return (
             "$logFile = '" + safe_log + "'\n"
-            "function Log($m) { try { Add-Content -Path $logFile -Value ((Get-Date -Format o) + ' ' + $m) } catch {} }\n"
+            "function Log($m) { try { Add-Content -Path $logFile -Value ((Get-Date -Format o) + ' ' + $m) -Encoding UTF8 } catch {} }\n"
             "Log '开始：等待旧进程退出 (pid=" + str(os.getpid()) + ")'\n"
             "$oldPid = " + str(os.getpid()) + "\n"
             "$deadline = (Get-Date).AddSeconds(180)\n"
@@ -1958,6 +1958,10 @@ UPDATE_AUTO_INTERVAL = int(os.environ.get("RTM_UPDATE_INTERVAL") or 30 * 60)
 UPDATE_CACHE_TTL = int(os.environ.get("RTM_UPDATE_TTL") or 2 * 3600)
 # 更新检查地址（RTM_UPDATE_API 可指向镜像）
 UPDATE_API = os.environ.get("RTM_UPDATE_API") or "https://api.github.com/repos/wuxinxin27/reverse-tunnel-manager/releases/latest"
+# 允许的安装包地址前缀（默认官方仓库；RTM_UPDATE_TRUST_PREFIX 逗号分隔可追加镜像前缀，主要用于内部镜像/测试）
+UPDATE_TRUST_PREFIXES = ("https://github.com/wuxinxin27/reverse-tunnel-manager/",) + tuple(
+    p.strip() for p in (os.environ.get("RTM_UPDATE_TRUST_PREFIX") or "").split(",") if p.strip()
+)
 
 
 def default_notify(title: str, body: str) -> None:
