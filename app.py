@@ -88,7 +88,7 @@ DEFAULT_SETTINGS = {
     "notify": True,          # 断开 / 重连成功等事件发系统通知
     "theme": "auto",         # 界面主题：auto / dark / light
     "language": "auto",      # 界面语言：auto / zh / en
-    "update_check": True,    # 启动时检查 GitHub 是否有新版本
+    "update_check": True,    # 自动检查更新（启动时 + 运行期间定时）
     "auto_update": True,     # 发现新版本后自动在应用内下载安装并重启
     "proxy_check": True,     # 定期探测本机目标端口（代理）是否在监听
 }
@@ -1198,8 +1198,11 @@ class Manager:
         self.update_job: dict | None = None      # 应用内更新进度
         self.on_quit_request = None              # 桌面层注入（更新完成后自动重启用）
         self._update_lock = threading.Lock()
+        self._last_update_check = 0.0            # 上次自动检查更新的时间
+        self._update_notified_for = ""           # 已提示过的新版本（避免重复通知）
         threading.Thread(target=self._background_loop, daemon=True).start()
         if self.config["settings"].get("update_check", True):
+            self._last_update_check = time.time()
             threading.Thread(target=self._refresh_update_info, daemon=True).start()
 
     # ---- 通知 / 后台巡检 / 流量持久化 ----
@@ -1483,28 +1486,56 @@ class Manager:
             pass
         return False
 
-    def _maybe_auto_update(self) -> None:
-        """发现新版本且已开启自动更新时，直接应用内更新并自动重启。"""
+    def _claim_auto_update(self, latest: str) -> bool:
+        """多实例（后台常驻 + 窗口）协调：同一新版本只允许一个实例执行安装。"""
+        now = time.time()
         try:
-            if not self.config["settings"].get("auto_update", True):
-                return
+            if UPDATE_CLAIM_FILE.exists():
+                d = {}
+                try:
+                    d = json.loads(UPDATE_CLAIM_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+                if str(d.get("latest") or "") == latest and now - float(d.get("ts") or 0) < 30 * 60:
+                    return False
+        except OSError:
+            pass
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            UPDATE_CLAIM_FILE.write_text(
+                json.dumps({"latest": latest, "ts": now, "pid": os.getpid()}), encoding="utf-8")
+        except OSError:
+            pass
+        return True
+
+    def _maybe_auto_update(self) -> None:
+        """发现新版本：已开启自动更新则直接应用内更新并自动重启；否则发系统通知提醒。"""
+        try:
             info = self.update_info or {}
-            if not info.get("has_update") or not info.get("latest"):
+            latest = str(info.get("latest") or "")
+            if not info.get("has_update") or not latest:
                 return
-            if self._update_failed_recently(info["latest"]):
+            if not self.config["settings"].get("auto_update", True):
+                if self._update_notified_for != latest:
+                    self._update_notified_for = latest
+                    self.notify("发现新版本", f"v{latest} 已发布，可在应用内一键更新。")
+                return
+            if self._update_failed_recently(latest):
                 return
             with self._update_lock:
                 phase = (self.update_job or {}).get("phase")
                 if phase in ("downloading", "installing", "restarting"):
                     return
+            if not self._claim_auto_update(latest):
+                return  # 另一个实例正在处理更新，避免重复安装
             time.sleep(5)
-            self.notify("正在自动更新", f"发现新版本 v{info['latest']}，正在应用内更新并自动重启…")
+            self.notify("正在自动更新", f"发现新版本 v{latest}，正在应用内更新并自动重启…")
             self.start_update_install()
         except Exception:
             pass
 
     def _background_loop(self) -> None:
-        """每 5 秒：本机目标端口健康检查；每 30 秒：流量落盘"""
+        """每 5 秒：端口健康检查；每 30 秒：流量落盘；定时：自动检查更新"""
         last_flush = 0.0
         while True:
             time.sleep(5)
@@ -1514,8 +1545,18 @@ class Manager:
                 if time.time() - last_flush >= 30:
                     self.flush_traffic()
                     last_flush = time.time()
+                self._maybe_periodic_update_check()
             except Exception:
                 pass
+
+    def _maybe_periodic_update_check(self) -> None:
+        """运行期间每隔 UPDATE_AUTO_INTERVAL 自动检查一次更新（无需手动点击）。"""
+        if not self.config["settings"].get("update_check", True):
+            return
+        if time.time() - self._last_update_check < UPDATE_AUTO_INTERVAL:
+            return
+        self._last_update_check = time.time()
+        threading.Thread(target=self._refresh_update_info, daemon=True).start()
 
     def _check_targets(self) -> None:
         for rt in list(self.runtimes.values()):
@@ -1709,6 +1750,7 @@ class Manager:
 
     def update_settings(self, data: dict) -> dict:
         with self.lock:
+            prev_update_check = self.config["settings"].get("update_check", True)
             for key in DEFAULT_SETTINGS:
                 if key not in data:
                     continue
@@ -1729,6 +1771,10 @@ class Manager:
                     v = str(data[key])
                     self.config["settings"][key] = v if v in ("auto", "zh", "en") else "auto"
             save_config(self.config)
+            if (not prev_update_check) and self.config["settings"].get("update_check", True):
+                # 用户重新开启自动检查时，立即检查一次
+                self._last_update_check = time.time()
+                threading.Thread(target=self._refresh_update_info, daemon=True).start()
             return dict(self.config["settings"])
 
     def test(self, data: dict) -> dict:
@@ -1877,7 +1923,13 @@ def set_autostart(enabled: bool) -> bool:
 TRAFFIC_FILE = DATA_DIR / "traffic.json"
 UPDATE_CACHE_FILE = DATA_DIR / "update_check.json"
 UPDATE_FAILED_FILE = DATA_DIR / "update_failed.json"
-UPDATE_API = "https://api.github.com/repos/wuxinxin27/reverse-tunnel-manager/releases/latest"
+UPDATE_CLAIM_FILE = DATA_DIR / "update_claim.json"
+# 运行期间自动检查更新的间隔（秒；RTM_UPDATE_INTERVAL 可用于调试/测试）
+UPDATE_AUTO_INTERVAL = int(os.environ.get("RTM_UPDATE_INTERVAL") or 30 * 60)
+# 检查结果缓存时长（秒；RTM_UPDATE_TTL 可用于调试/测试）
+UPDATE_CACHE_TTL = int(os.environ.get("RTM_UPDATE_TTL") or 2 * 3600)
+# 更新检查地址（RTM_UPDATE_API 可指向镜像）
+UPDATE_API = os.environ.get("RTM_UPDATE_API") or "https://api.github.com/repos/wuxinxin27/reverse-tunnel-manager/releases/latest"
 
 
 def default_notify(title: str, body: str) -> None:
@@ -1905,7 +1957,7 @@ def _version_tuple(v: str) -> tuple:
 
 
 def check_update(force: bool = False) -> dict:
-    """检查 GitHub 最新 Release；结果缓存 6 小时，网络失败时退回缓存。"""
+    """检查 GitHub 最新 Release；结果缓存 UPDATE_CACHE_TTL，网络失败时退回缓存。"""
     now = time.time()
     cached = None
     try:
@@ -1913,7 +1965,7 @@ def check_update(force: bool = False) -> dict:
             cached = json.loads(UPDATE_CACHE_FILE.read_text(encoding="utf-8"))
     except Exception:
         cached = None
-    if not force and cached and now - float(cached.get("checked_at") or 0) < 6 * 3600:
+    if not force and cached and now - float(cached.get("checked_at") or 0) < UPDATE_CACHE_TTL:
         cached = dict(cached)
         latest_c = str(cached.get("latest") or "")
         cached["current"] = VERSION
@@ -1957,7 +2009,9 @@ def check_update(force: bool = False) -> dict:
                 "has_update": False, "url": "", "asset_url": "", "error": str(e)}
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        UPDATE_CACHE_FILE.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        tmp = UPDATE_CACHE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, UPDATE_CACHE_FILE)  # 原子写，避免并发读取到半截 JSON
     except OSError:
         pass
     return info

@@ -5,16 +5,21 @@
 推 `v*` 标签后，[.github/workflows/release.yml](../../.github/workflows/release.yml) 会在
 windows-latest 上自动完成：
 
-1. PyInstaller 打包 `dist/ReverseTunnelManager.exe`（单文件、无控制台）
+1. PyInstaller 打包 `dist/ReverseTunnelManager/`（目录版/onedir，无控制台）
 2. Inno Setup 编译出安装包 `dist/ReverseTunnelManager-<版本>-setup.exe`
 3. 与 Ubuntu 的 `.deb` 一起附到 GitHub Release 上
+
+> 为什么用目录版而不是单文件：单文件模式每次启动都要把 `python312.dll` 等解压到
+> `%TEMP%\_MEIxxxx`，企业电脑上的杀毒软件 / ASR 策略 / 清理工具可能把它删掉或拦截，
+> 导致 `Failed to load Python DLL ... 找不到指定的模块` 崩溃。目录版直接从安装目录加载，
+> 启动更快也更稳。
 
 ## 本地构建
 
 ```powershell
 pip install pyinstaller pywebview pystray pillow
 
-pyinstaller --noconfirm --clean --onefile --noconsole `
+pyinstaller --noconfirm --clean --onedir --noconsole `
   --name ReverseTunnelManager `
   --icon assets/icon.ico `
   --add-data "static;static" `
@@ -34,7 +39,7 @@ pyinstaller --noconfirm --clean --onefile --noconsole `
 
 产物：
 
-- `dist\ReverseTunnelManager.exe` —— 绿色单文件
+- `dist\ReverseTunnelManager\` —— 绿色目录版（整个目录一起拷走即可用）
 - `dist\ReverseTunnelManager-1.1.4-setup.exe` —— 安装包（开始菜单、可选桌面图标、可选开机自启）
 
 ## 说明

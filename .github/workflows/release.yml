@@ -51,10 +51,10 @@ jobs:
       - name: 安装 PyInstaller 与 pywebview
         run: pip install --no-cache-dir pyinstaller pywebview pystray pillow
 
-      - name: 打包单文件 exe
+      - name: 打包目录版（onedir，避免单文件解压到 %TEMP% 被杀软/清理工具拦截）
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --noconsole `
+          pyinstaller --noconfirm --clean --onedir --noconsole `
             --name ReverseTunnelManager `
             --icon assets/icon.ico `
             --add-data "static;static" `
@@ -81,11 +81,11 @@ jobs:
           name: windows-installer
           path: dist/*setup.exe
 
-      - name: 上传独立 exe（用于自动校验打包内容）
+      - name: 上传目录版（用于自动校验打包内容）
         uses: actions/upload-artifact@v4
         with:
-          name: windows-standalone-exe
-          path: dist/ReverseTunnelManager.exe
+          name: windows-onedir
+          path: dist/ReverseTunnelManager/
 
   build-macos:
     name: macOS 安装包（.dmg）
