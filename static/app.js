@@ -19,8 +19,8 @@ const I18N = {
     "card.ports": "🩺 端口",
     "card.reset_title": "清零这条隧道的流量统计（含图表与持久化记录）",
     "card.today": "今日", "card.total": "累计",
-    "card.traffic_tip": "隧道总流量（上下行合计）；今日/累计为持久化统计（重启不丢），基于 ssh 进程 I/O",
-    "card.chart_left": "← 最近 10 分钟", "card.chart_right": "每柱 ≈10 秒 · 峰值 {0}/s",
+    "card.traffic_tip": "隧道总流量（上下行合计）；今日/累计为持久化统计（重启不丢）。Windows 按服务器侧 /proc 统计（{0} 秒粒度），其他平台按本机 ssh 进程统计",
+    "card.chart_left": "← 最近 {0} 分钟", "card.chart_right": "每柱 ≈{0} 秒 · 峰值 {1}/s",
     "card.chart_tip": "{0} · 合计 {1}（约 {2}/s）",
     "card.proxy_down": "⚠ 本机代理 {0} 未监听（隧道已就绪，代理启动后即通）",
     "empty.tunnels": "还没有隧道。点击右上角「＋ 新建隧道」开始配置。",
@@ -123,8 +123,8 @@ const I18N = {
     "card.ports": "🩺 Ports",
     "card.reset_title": "Reset traffic stats for this tunnel (chart and persisted totals)",
     "card.today": "Today", "card.total": "Total",
-    "card.traffic_tip": "Total traffic (up+down). Today/Total are persisted across restarts; measured from the ssh process I/O",
-    "card.chart_left": "← last 10 minutes", "card.chart_right": "≈10 s/bar · peak {0}/s",
+    "card.traffic_tip": "Total traffic (up+down). Today/Total persist across restarts. Windows: measured server-side /proc ({0}s granularity); other platforms: local ssh process I/O",
+    "card.chart_left": "← last {0} min", "card.chart_right": "≈{0} s/bar · peak {1}/s",
     "card.chart_tip": "{0} · {1} (≈{2}/s)",
     "card.proxy_down": "⚠ local proxy {0} is not listening (tunnel is fine; it works once the proxy is up)",
     "empty.tunnels": "No tunnels yet. Click “＋ New tunnel” to get started.",
@@ -485,10 +485,12 @@ function renderCard(x) {
   card.appendChild(meta);
 
   // 流量统计行：实时速率 + 今日 / 累计（持久化）
+  const sampleInt = Number(x.traffic_sample_interval) || 2;
+  const perBar = CHART_SAMPLES_PER_BAR * sampleInt;   // 每根柱代表的秒数
   const traffic = el("div", "card-traffic");
   const tspan = el("span", null,
     `⇅ ${fmtBytes(x.rate)}/s · ${t("card.today")} ${fmtBytes(x.traffic_today)} · ${t("card.total")} ${fmtBytes(x.traffic_total)}`);
-  tspan.title = t("card.traffic_tip");
+  tspan.title = t("card.traffic_tip", sampleInt);
   traffic.appendChild(tspan);
   const resetT = el("button", "btn tiny", t("card.reset"));
   resetT.title = t("card.reset_title");
@@ -514,9 +516,10 @@ function renderCard(x) {
   card.appendChild(wrap);
   drawChart(chart, bars);
   const note = el("div", "chart-note");
-  note.appendChild(el("span", null, t("card.chart_left")));
+  const spanMin = Math.max(1, Math.round((bars.length * perBar) / 60));
+  note.appendChild(el("span", null, t("card.chart_left", spanMin)));
   const peak = bars.length ? Math.max(...bars.map((b) => b.v)) : 0;
-  note.appendChild(el("span", null, t("card.chart_right", fmtBytes(peak / 10))));
+  note.appendChild(el("span", null, t("card.chart_right", Math.round(perBar), fmtBytes(peak / perBar))));
   card.appendChild(note);
 
   chart.addEventListener("mousemove", (ev) => {
@@ -528,7 +531,7 @@ function renderCard(x) {
     const idx = my.length - 1 - fromRight;
     if (idx < 0 || idx >= my.length) { tip.classList.add("hidden"); return; }
     const b = my[idx];
-    tip.textContent = t("card.chart_tip", timeAgo(b.t), fmtBytes(b.v), fmtBytes(b.v / 10));
+    tip.textContent = t("card.chart_tip", timeAgo(b.t), fmtBytes(b.v), fmtBytes(b.v / perBar));
     tip.classList.remove("hidden");
     const wrapRect = wrap.getBoundingClientRect();
     tip.style.left = Math.max(0, Math.min(ev.clientX - wrapRect.left + 10, wrapRect.width - 220)) + "px";

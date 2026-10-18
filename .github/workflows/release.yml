@@ -141,6 +141,11 @@ jobs:
             throw "背景模式托盘未确认显示（state.tray=$($state2.tray)）"
           }
           Write-Host "✅ 背景模式托盘图标已确认真实显示（state.tray=true）"
+          if ($state2.tunnels[0].traffic_remote -ne $true) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw "Windows 应启用远端流量统计模式（traffic_remote=true），实际=$($state2.tunnels[0].traffic_remote)"
+          }
+          Write-Host "✅ 流量统计已启用服务器侧模式（traffic_remote=true，间隔 $($state2.tunnels[0].traffic_sample_interval)s）"
           Invoke-WebRequest "http://127.0.0.1:8899/api/quit" -Method Post -UseBasicParsing -TimeoutSec 5 | Out-Null
           foreach ($i in 1..15) { if ($proc.HasExited) { break }; Start-Sleep -Seconds 1 }
           if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force; throw "未能干净退出" }

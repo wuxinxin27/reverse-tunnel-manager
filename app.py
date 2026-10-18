@@ -35,6 +35,7 @@ import sys
 import tarfile
 import threading
 import time
+import traceback
 import urllib.request
 import uuid
 import webbrowser
@@ -740,6 +741,112 @@ def _port_clean_script(port: int, pid: int) -> str:
     )
 
 
+# ---- 远端流量采样（Windows 无法按进程统计套接字流量，改由服务器侧 /proc 采样） ----
+
+def _remote_traffic_interval() -> int:
+    try:
+        return max(3, min(600, int(os.environ.get("RTM_TRAFFIC_INTERVAL") or 15)))
+    except ValueError:
+        return 15
+
+
+_PY_REMOTE_IO = """
+import os, sys
+ports = [int(x) for x in sys.argv[1:]]
+def listen_inodes(p):
+    inos = []
+    for proto in ("tcp", "tcp6"):
+        try:
+            lines = open("/proc/net/" + proto).read().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            f = line.split()
+            if len(f) < 10 or f[3] != "0A":
+                continue
+            try:
+                if int(f[1].rsplit(":", 1)[1], 16) == p:
+                    inos.append(f[9])
+            except ValueError:
+                continue
+    return inos
+def pid_for(inode):
+    target = "socket:[" + inode + "]"
+    try:
+        pids = [d for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        return None
+    for pd in pids:
+        try:
+            fds = os.listdir("/proc/" + pd + "/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink("/proc/" + pd + "/fd/" + fd) == target:
+                    return int(pd)
+            except OSError:
+                continue
+    return None
+print("__OK__")
+for p in ports:
+    pid = None
+    for ino in listen_inodes(p):
+        pid = pid_for(ino)
+        if pid:
+            break
+    if not pid:
+        print("__IO__ " + str(p) + "|||")
+        continue
+    r = w = ""
+    try:
+        vals = {}
+        for line in open("/proc/" + str(pid) + "/io"):
+            k, _, v = line.partition(":")
+            vals[k.strip()] = v.strip()
+        r = vals.get("rchar", "")
+        w = vals.get("wchar", "")
+    except OSError:
+        pass
+    print("__IO__ " + str(p) + "|" + str(pid) + "|" + r + "|" + w)
+"""
+
+_SH_REMOTE_IO = (
+    "echo __OK__\n"
+    "ports=\"$*\"\n"
+    "for p in $ports; do\n"
+    "  hex=$(printf '%04X' \"$p\")\n"
+    "  line=$(grep -h -i \":$hex \" /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep \" 0A \" | head -1)\n"
+    "  if [ -z \"$line\" ]; then echo \"__IO__ $p|||\"; continue; fi\n"
+    "  set -- $line\n"
+    "  inode=${10}\n"
+    "  pid=\"\"\n"
+    "  for pd in /proc/[0-9]*; do\n"
+    "    for fd in \"$pd\"/fd/*; do\n"
+    "      if [ \"$(readlink \"$fd\" 2>/dev/null)\" = \"socket:[$inode]\" ]; then pid=${pd#/proc/}; break 2; fi\n"
+    "    done\n"
+    "  done\n"
+    "  r=\"\"; w=\"\"\n"
+    "  if [ -n \"$pid\" ] && [ -r \"/proc/$pid/io\" ]; then\n"
+    "    r=$(grep '^rchar:' \"/proc/$pid/io\" 2>/dev/null | tr -dc '0-9')\n"
+    "    w=$(grep '^wchar:' \"/proc/$pid/io\" 2>/dev/null | tr -dc '0-9')\n"
+    "  fi\n"
+    "  echo \"__IO__ $p|$pid|$r|$w\"\n"
+    "done\n"
+)
+
+
+def _remote_io_script(ports: list[int]) -> str:
+    plist = " ".join(str(int(p)) for p in ports)
+    return (
+        "if command -v python3 >/dev/null 2>&1; then\n"
+        "  python3 -c '" + _PY_REMOTE_IO.strip() + "' " + plist + "\n"
+        "else\n"
+        "  sh -c '" + _sh_quote(_SH_REMOTE_IO) + "' rtm " + plist + "\n"
+        "fi\n"
+    )
+
+
 # ---------------------------------------------------------------- 隧道运行时
 
 STATE_LABELS = {
@@ -777,6 +884,15 @@ class TunnelRuntime:
         self.traffic_history: collections.deque = collections.deque(maxlen=320)  # 每 ~2 秒一个采样点 (时间, 字节)
         self._io_last: tuple[int, int] | None = None
         self._io_time = 0.0
+        # Windows 的 GetProcessIoCounters 不统计套接字流量（实测确认），改从服务器侧
+        # /proc 采样；RTM_TRAFFIC_REMOTE=1/0 可强制开/关（便于测试）。
+        env_tr = os.environ.get("RTM_TRAFFIC_REMOTE")
+        if env_tr in ("0", "1"):
+            self.traffic_remote = env_tr == "1"
+        else:
+            self.traffic_remote = os.name == "nt"
+        self._remote_io: dict = {}   # port(str) -> (pid, rchar, wchar)，远端采样基线
+        self._remote_time = 0.0
         # 本机目标端口（代理）健康状态
         self.target_ok: bool | None = None
         self.target_info = ""
@@ -875,11 +991,35 @@ class TunnelRuntime:
         self._io_last = io
         self._io_time = now
 
+    def _apply_remote_io(self, rows: list, now: float) -> None:
+        """服务器侧采样一轮：rows 为 [(port, pid, rchar|None, wchar|None), ...]（该隧道的所有端口）。"""
+        total = 0
+        with self.lock:
+            dt = max(0.5, now - self._remote_time) if self._remote_time else 0.0
+            for port, pid, r, w in rows:
+                key = str(port)
+                if not pid or r is None or w is None:
+                    self._remote_io.pop(key, None)
+                    continue
+                prev = self._remote_io.get(key)
+                if prev and prev[0] == pid:
+                    total += (max(0, r - prev[1]) + max(0, w - prev[2])) // 2
+                self._remote_io[key] = (pid, r, w)
+            self._remote_time = now
+            if total > 0:
+                self.traffic += total
+                if dt:
+                    self.rate = total / dt
+                self.traffic_history.append((round(now, 1), total))
+                self._add_persist_locked(total)
+
     def reset_traffic(self) -> None:
         with self.lock:
             self.traffic = 0
             self.rate = 0.0
             self.traffic_history.clear()
+            self._remote_io = {}
+            self._remote_time = 0.0
             today = datetime.now().strftime("%Y-%m-%d")
             self.persist_date = today
             self.persist_today = 0
@@ -1036,12 +1176,20 @@ class TunnelRuntime:
                         self._set(state="running", detail=self.warning, run_since=time.time(), retries=0)
                         self._io_last = read_process_io(proc.pid)
                         self._io_time = time.time()
+                        if self.traffic_remote:
+                            try:
+                                self.manager.request_remote_sample()
+                            except Exception:
+                                pass
                         self._log("===== 隧道已建立 =====")
                         if was_retries >= 2:
                             self._notify_throttled(f"隧道已重连：{self.tunnel['name']}",
                                                    f"经 {was_retries} 次重试后恢复连接", min_interval=5)
                     if announced and time.time() - self._io_time >= 2.0:
-                        self._sample_traffic(proc)
+                        # 远端统计模式（Windows）下不再做本地采样：Windows 的进程 I/O
+                        # 计数不含套接字流量，且避免与远端采样互相覆盖速率值
+                        if not self.traffic_remote:
+                            self._sample_traffic(proc)
                     continue
                 line = line.rstrip("\r\n")
                 if line:
@@ -1155,6 +1303,8 @@ class TunnelRuntime:
                 "rate": round(self.rate, 1),
                 "traffic_today": self.persist_today,
                 "traffic_total": self.persist_total,
+                "traffic_remote": self.traffic_remote,
+                "traffic_sample_interval": (_remote_traffic_interval() if self.traffic_remote else 2),
                 "target_ok": self.target_ok,
                 "target_info": self.target_info,
                 "history": list(self.traffic_history),
@@ -1200,7 +1350,10 @@ class Manager:
         self._update_lock = threading.Lock()
         self._last_update_check = 0.0            # 上次自动检查更新的时间
         self._update_notified_for = ""           # 已提示过的新版本（避免重复通知）
+        self._remote_sample_wake = threading.Event()  # 隧道就绪时立刻采样一次（尽早建立基线）
         threading.Thread(target=self._background_loop, daemon=True).start()
+        # 远端流量采样（Windows 场景）：空闲时每轮仅做一次字典过滤，开销可忽略
+        threading.Thread(target=self._remote_traffic_loop, daemon=True).start()
         if self.config["settings"].get("update_check", True):
             self._last_update_check = time.time()
             threading.Thread(target=self._refresh_update_info, daemon=True).start()
@@ -1585,6 +1738,80 @@ class Manager:
             return
         self._last_update_check = time.time()
         threading.Thread(target=self._refresh_update_info, daemon=True).start()
+
+    # ---- 远端流量采样（Windows 无法按进程统计套接字流量，从服务器侧 /proc 采样） ----
+
+    def _remote_traffic_loop(self) -> None:
+        interval = _remote_traffic_interval()
+        if os.environ.get("RTM_DEBUG_TRAFFIC"):
+            print(f"[traffic-debug] 远端采样循环启动 interval={interval}s", flush=True)
+        while True:
+            self._remote_sample_wake.wait(interval)
+            self._remote_sample_wake.clear()
+            try:
+                self._remote_traffic_tick()
+            except Exception:
+                traceback.print_exc()
+
+    def request_remote_sample(self) -> None:
+        """隧道刚就绪/重连时调用：让采样器立刻取一次基线，避免丢掉最初一段流量。"""
+        self._remote_sample_wake.set()
+
+    def _remote_traffic_tick(self) -> None:
+        # 按连接配置分组：同配置的隧道共用一次 SSH 采样
+        groups: dict = {}
+        for rt in list(self.runtimes.values()):
+            if os.environ.get("RTM_DEBUG_TRAFFIC"):
+                print(f"[traffic-debug] tick {time.strftime('%H:%M:%S')} 隧道 {rt.tunnel.get('name')} "
+                      f"state={rt.state} remote={getattr(rt, 'traffic_remote', None)}", flush=True)
+            if not getattr(rt, "traffic_remote", False) or rt.state != "running":
+                continue
+            t = rt.tunnel
+            key = (t.get("mode"), t.get("alias"), t.get("host"), t.get("port"), t.get("user"),
+                   t.get("identity"), t.get("hostkey_policy"), t.get("extra_args"))
+            groups.setdefault(key, []).append(rt)
+        for rts in groups.values():
+            ports = sorted({int(r["remote_port"]) for rt in rts for r in (rt.tunnel.get("rules") or [])})
+            if not ports:
+                continue
+            if os.environ.get("RTM_DEBUG_TRAFFIC"):
+                print(f"[traffic-debug] 查询开始 ports={ports}", flush=True)
+            rows = self._remote_io_query(rts[0].tunnel, ports)
+            if os.environ.get("RTM_DEBUG_TRAFFIC"):
+                print(f"[traffic-debug] 查询完成 rows={rows}", flush=True)
+            now = time.time()
+            for rt in rts:
+                own = sorted({int(r["remote_port"]) for r in (rt.tunnel.get("rules") or [])})
+                rt._apply_remote_io([rows[str(p)] for p in own if str(p) in rows], now)
+
+    def _remote_io_query(self, tunnel: dict, ports: list[int]) -> dict:
+        """跑一次远程采样脚本，返回 {port: (port, pid, rchar|None, wchar|None)}。"""
+        try:
+            cmd = build_ssh_command(tunnel, extra_args=self.extra_ssh_args(), for_probe=True,
+                                    remote_script=_remote_io_script(ports))
+        except RuntimeError:
+            return {}
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45,
+                                  **_no_window_run_kwargs())
+        except subprocess.TimeoutExpired:
+            if os.environ.get("RTM_DEBUG_TRAFFIC"):
+                print("[traffic-debug] 查询超时（45s）", flush=True)
+            return {}
+        out: dict = {}
+        for line in ((proc.stdout or "") + (proc.stderr or "")).splitlines():
+            s = line.strip()
+            if not s.startswith("__IO__ "):
+                continue
+            parts = s[len("__IO__ "):].split("|", 3)
+            if len(parts) < 4:
+                continue
+            port = parts[0].strip()
+            pid = parts[1].strip()
+            r = int(parts[2]) if parts[2].strip().isdigit() else None
+            w = int(parts[3]) if parts[3].strip().isdigit() else None
+            out[port] = (port, pid, r, w)
+        return out
 
     def _check_targets(self) -> None:
         for rt in list(self.runtimes.values()):
