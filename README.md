@@ -15,7 +15,7 @@
 ## 特性
 
 - 🖥 **可视化配置**：独立原生窗口（Linux GTK/WebKit2、Windows WebView2、macOS WKWebView），增删改查、启停隧道、查看实时日志
-- 📌 **最小化到状态栏**：关闭窗口自动隐藏到系统托盘（Ubuntu 顶栏 / Windows 任务栏），托盘菜单直接列出并启停每条隧道，悬浮显示总速率
+- 📌 **最小化到状态栏**：关闭或最小化窗口都会收缩到系统托盘（Ubuntu 顶栏 / Windows 右下角），托盘菜单直接列出并启停每条隧道，悬浮显示总速率
 - 📊 **流量统计**：实时速率 + 今日 / 累计流量（持久化，重启不丢），附最近 10 分钟柱状图（悬停查看数值），一键清零
 - ❤️ **代理健康检查**：定期探测本机代理端口（如 7890）；Clash 没开时卡片直接警示，恢复后自动提示
 - 🔁 **智能重连**：指数退避（最长 60 秒）+ 网络恢复立即重连，服务器抖动不再干等
@@ -105,6 +105,7 @@ Windows 源码运行原生窗口需 `pip install pywebview`；以上缺失时会
 | 关闭窗口后程序「不见了」 | Linux 上已最小化到顶栏状态栏（托盘），隧道继续运行；点顶栏图标重新打开，彻底退出用托盘菜单「退出」 |
 | 顶栏没有托盘图标 | 缺少 AppIndicator 组件：`sudo apt install gir1.2-ayatanaappindicator3-0.1` 后重启工具 |
 | 不弹系统通知 | Linux 需安装 `libnotify-bin`（`sudo apt install libnotify-bin`）；macOS 首次需在系统设置中允许本 App 通知 |
+| Windows 托盘图标没出现 | 查看日志 `%LOCALAPPDATA%\ReverseTunnelManager\logs\desktop.log`；图标也可能收在任务栏右下角的 `^` 溢出区里 |
 | 检查更新失败 | 网络原因（GitHub API 不可达），不影响使用，可忽略 |
 | 编辑后不生效 | 运行中的隧道需要点「⟳ 重启」 |
 | 端口 8787 被占用 | 在设置里改「Web 界面端口」后重启工具 |

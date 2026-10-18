@@ -29,6 +29,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 from pathlib import Path
 
@@ -134,6 +135,30 @@ def _tray_icon_file() -> str:
     return str(src)
 
 
+def _setup_logging(core) -> None:
+    """桌面版（无控制台）：把 stdout/stderr 写入日志文件，失败信息可追踪。"""
+    try:
+        if sys.stdout is not None and sys.stderr is not None and not getattr(sys, "frozen", False):
+            if os.name != "nt" and sys.platform != "darwin":
+                return
+        log_dir = core.DATA_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "desktop.log"
+        try:
+            if log_file.exists() and log_file.stat().st_size > 2 * 1024 * 1024:
+                log_file.replace(log_file.with_suffix(".log.1"))
+        except OSError:
+            pass
+        stream = open(log_file, "a", encoding="utf-8", buffering=1)
+        sys.stdout = stream
+        sys.stderr = stream
+        print()
+        print(f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} desktop 启动 =====")
+        print(f"platform={sys.platform} frozen={getattr(sys, 'frozen', False)} args={sys.argv[1:]}")
+    except Exception:
+        pass
+
+
 def _fmt_bytes(n) -> str:
     try:
         v = float(n)
@@ -171,12 +196,16 @@ def _create_tray_win32(window, manager, quit_cb):
         import pystray
         from PIL import Image
     except Exception:
+        traceback.print_exc()
+        print("[tray] 无法导入 pystray / Pillow，系统托盘不可用")
         return None
     icon_png = ICON.parent / "icon.png"
     try:
         image = Image.open(str(icon_png if icon_png.exists() else ICON))
         image.load()
     except Exception:
+        traceback.print_exc()
+        print("[tray] 无法加载托盘图标文件")
         return None
 
     L = _TRAY_LABELS[_tray_lang(manager)]
@@ -197,7 +226,7 @@ def _create_tray_win32(window, manager, quit_cb):
     def on_quit(icon, item):
         quit_cb()
 
-    def build_menu():
+    def build_menu(*_args):
         items = []
         try:
             snaps = manager.state()["tunnels"]
@@ -232,6 +261,8 @@ def _create_tray_win32(window, manager, quit_cb):
         icon = pystray.Icon("reverse-tunnel-manager", image, L["title"], menu)
         threading.Thread(target=icon.run, daemon=True).start()
     except Exception:
+        traceback.print_exc()
+        print("[tray] pystray 初始化失败")
         return None
 
     def _title_loop():
@@ -379,9 +410,11 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
                 tray_available = True
                 print("系统托盘已启用（动态隧道菜单 + 速率显示）")
             except Exception as e:
+                traceback.print_exc()
                 print(f"[提示] 系统托盘初始化失败（{e}）")
                 indicator = None
                 tray_available = False
+        manager.tray_available = tray_available
 
     def quit_all(*_):
         """停止全部隧道并退出（幂等）"""
@@ -440,6 +473,23 @@ def run_gtk_window(url, owns, manager, httpd, core) -> int | None:
 
     win.connect("delete-event", on_delete)
 
+    if owns and tray_available:
+        try:
+            from gi.repository import Gdk
+
+            def _on_window_state(_w, event):
+                if event.new_window_state & Gdk.WindowState.ICONIFIED:
+                    _w.hide()
+                    if not state.get("tray_hint_shown"):
+                        state["tray_hint_shown"] = True
+                        _notify_tray_hint()
+                    return True
+                return False
+
+            win.connect("window-state-event", _on_window_state)
+        except Exception:
+            traceback.print_exc()
+
     if owns:
         # 注意：类属性不能用 lambda（会被绑定成实例方法），用 partial
         httpd.RequestHandlerClass.shutdown_cb = functools.partial(GLib.idle_add, quit_all)
@@ -495,40 +545,68 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
         if owns and sys.platform != "darwin":
             tray_icon = _create_tray_win32(window, manager, lambda: quit_all())
             if tray_icon is not None:
+                manager.tray_available = True
                 try:
                     manager.set_notifier(lambda title, body, _i=tray_icon: _i.notify(body, title))
                 except Exception:
-                    pass
-            if tray_icon is None:
-                print("[提示] 未启用系统托盘（源码运行可 pip install pystray pillow 后重启）")
+                    traceback.print_exc()
+                print("[tray] 系统托盘已启用")
+            else:
+                manager.tray_available = False
+                print("[tray] 系统托盘不可用：关闭/最小化窗口将退出。"
+                      "（详见本日志；打包版请确认包含 pystray/Pillow）")
         elif owns:
+            manager.tray_available = False
             print("[提示] macOS 上暂不支持系统托盘；关闭窗口将退出工具。")
+
+        def _hide_window() -> bool:
+            try:
+                if hasattr(window, "hide"):
+                    window.hide()
+                else:
+                    window.minimize()
+                return True
+            except Exception:
+                traceback.print_exc()
+                return False
+
+        def _show_tray_hint():
+            if state.get("tray_hint_shown"):
+                return
+            state["tray_hint_shown"] = True
+            try:
+                tray_icon.notify(
+                    "已收缩到右下角状态栏，隧道继续在后台运行。双击/右键托盘图标可重新打开。",
+                    "反向隧道管理器")
+            except Exception:
+                traceback.print_exc()
 
         def on_closing():
             if state["quitting"] or not owns:
                 return True
             if tray_icon is not None:
-                # 最小化到托盘：隐藏窗口，隧道继续运行
-                try:
-                    window.hide()
-                    if not state.get("tray_hint_shown"):
-                        state["tray_hint_shown"] = True
-                        try:
-                            tray_icon.notify(
-                                "已最小化到状态栏，隧道继续在后台运行。点击托盘图标可重新打开。",
-                                "反向隧道管理器")
-                        except Exception:
-                            pass
-                except Exception:
-                    return True
-                return False  # 取消关闭，隐藏到托盘
+                if _hide_window():
+                    _show_tray_hint()
+                    return False  # 取消关闭，隐藏到托盘
             try:
                 return bool(window.create_confirmation_dialog(
                     "反向隧道管理器", "关闭窗口将停止全部隧道并退出工具。\n确定要退出吗？"))
             except Exception:
+                traceback.print_exc()
                 return True
 
+        def on_minimized(*_):
+            """点最小化按钮 → 收缩到托盘"""
+            if state["quitting"] or not owns or tray_icon is None:
+                return
+            if _hide_window():
+                _show_tray_hint()
+
         window.events.closing += on_closing
+        try:
+            window.events.minimized += on_minimized
+        except Exception:
+            traceback.print_exc()  # 该 pywebview 版本不支持 minimized 事件时忽略
         if owns:
             httpd.RequestHandlerClass.shutdown_cb = functools.partial(quit_all)
             start_enabled_async(manager)
@@ -555,6 +633,7 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
 # ---------------------------------------------------------------- 兜底：Edge/Chrome 应用窗口
 
 def run_browser_window(url, owns, manager, httpd, core) -> int:
+    manager.tray_available = False
     browser = find_browser()
     stop_event = threading.Event()
     if owns:
@@ -613,6 +692,8 @@ def main() -> int:
     args = parser.parse_args()
 
     import app as core  # 复用 app.py 的核心逻辑
+
+    _setup_logging(core)
 
     try:
         cfg_port = int(core.load_config()["settings"].get("ui_port", 8787))

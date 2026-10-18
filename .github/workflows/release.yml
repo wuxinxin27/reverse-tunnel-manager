@@ -61,6 +61,7 @@ jobs:
             --add-data "assets;assets" `
             --collect-all webview `
             --collect-all clr_loader `
+            --collect-all pystray `
             --hidden-import clr `
             --hidden-import pystray._win32 `
             desktop.py

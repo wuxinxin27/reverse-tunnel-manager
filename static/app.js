@@ -83,6 +83,7 @@ const I18N = {
     "settings.check_failed": "检查失败：{0}",
     "update.banner": "🎉 新版本 {0} · 点此查看",
     "offline": "与工具后端失去连接 —— 如果工具已退出，请重新运行 app.py",
+    "tray.unavailable": "⚠ 系统托盘不可用：关闭或最小化窗口将退出。详见 logs/desktop.log",
     "time.h": "{0} 小时 {1} 分", "time.m": "{0} 分 {1} 秒", "time.s": "{0} 秒",
     "ago.seconds": "{0} 秒前", "ago.minutes": "{0} 分钟前",
   },
@@ -166,6 +167,7 @@ const I18N = {
     "settings.check_failed": "Check failed: {0}",
     "update.banner": "🎉 New version {0} · click here",
     "offline": "Backend unreachable — restart the app if it was closed",
+    "tray.unavailable": "⚠ System tray unavailable: closing or minimizing will quit. See logs/desktop.log",
     "time.h": "{0}h {1}m", "time.m": "{0}m {1}s", "time.s": "{0}s",
     "ago.seconds": "{0}s ago", "ago.minutes": "{0}m ago",
   },
@@ -304,6 +306,7 @@ const S = {
   logLines: [],
   editingId: null,
   updateToastShown: false,
+  trayWarnShown: false,
 };
 
 /* ================= 状态轮询与渲染 ================= */
@@ -315,6 +318,10 @@ async function loadState() {
     S.settings = data.settings || {};
     S.version = data.version || "";
     S.update = data.update || null;
+    if (data.tray === false && !S.trayWarnShown) {
+      S.trayWarnShown = true;
+      toast(t("tray.unavailable"), "error");
+    }
     applyTheme(S.settings.theme || "auto");
     const lang = resolveLang(S.settings.language || "auto");
     if (lang !== LANG) {

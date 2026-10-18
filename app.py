@@ -49,7 +49,7 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 ICON_FILE = APP_DIR / "assets" / "icon.svg"
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 
 
 def _base_dir(kind: str) -> Path:
@@ -920,6 +920,7 @@ class Manager:
             except Exception:
                 pass
         self.notifier = None          # 桌面层可覆盖（Windows 托盘通知等）
+        self.tray_available: bool | None = None  # 桌面层上报系统托盘是否可用
         self.update_info: dict | None = None
         threading.Thread(target=self._background_loop, daemon=True).start()
         if self.config["settings"].get("update_check", True):
@@ -1037,6 +1038,7 @@ class Manager:
                 "settings": dict(self.config["settings"]),
                 "tunnels": [rt.snapshot() for rt in self.runtimes.values()],
                 "update": self.update_info,
+                "tray": self.tray_available,
             }
 
     def logs(self, tid: str, since: int) -> dict:
