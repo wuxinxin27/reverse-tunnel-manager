@@ -187,7 +187,15 @@ def _tray_lang(manager) -> str:
         lang = "auto"
     if lang in ("zh", "en"):
         return lang
-    return "zh" if str(os.environ.get("LANG", "")).lower().startswith("zh") else "en"
+    env_lang = os.environ.get("LANG", "") or ""
+    if env_lang:
+        return "zh" if env_lang.lower().startswith("zh") else "en"
+    try:
+        import locale
+        sys_lang = (locale.getlocale()[0] or "")
+    except Exception:
+        sys_lang = ""
+    return "zh" if sys_lang.lower().startswith("zh") else "en"
 
 
 def _create_tray_win32(window, manager, quit_cb):
@@ -633,7 +641,8 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
 # ---------------------------------------------------------------- 兜底：Edge/Chrome 应用窗口
 
 def run_browser_window(url, owns, manager, httpd, core) -> int:
-    manager.tray_available = False
+    if manager is not None:
+        manager.tray_available = False
     browser = find_browser()
     stop_event = threading.Event()
     if owns:
