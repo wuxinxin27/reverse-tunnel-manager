@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "xerj": {
+        "type": "local",
+        "command": ["/home/wu/.local/bin/xerj", "mcp"]
+      }
+    }
+  }
+}
