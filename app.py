@@ -2178,6 +2178,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.manager.stop_all()
                 if callable(self.shutdown_cb):
                     threading.Timer(0.3, self.shutdown_cb).start()
+                else:
+                    # 桌面层尚未接线（启动竞态，例如刚起就被要求退出）：兜底硬退出，
+                    # 保证 /api/quit 在任何时刻都真实有效
+                    threading.Thread(target=self.manager._hard_quit, daemon=True).start()
                 return self._json({"ok": True})
 
             m = re.fullmatch(r"/api/tunnels/([0-9a-f]+)/(start|stop|restart|duplicate|traffic_reset|port_check|port_clean)", path)

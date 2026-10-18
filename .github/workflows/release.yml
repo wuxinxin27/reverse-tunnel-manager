@@ -183,7 +183,12 @@ jobs:
           if (-not $ok) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "升级后的新版启动失败" }
           Write-Host "✅ 升级后的新版运行正常"
           Invoke-WebRequest "http://127.0.0.1:8898/api/quit" -Method Post -UseBasicParsing -TimeoutSec 5 | Out-Null
-          foreach ($i in 1..15) { if ($proc.HasExited) { break }; Start-Sleep -Seconds 1 }
+          foreach ($i in 1..8) { if ($proc.HasExited) { break }; Start-Sleep -Seconds 1 }
+          if (-not $proc.HasExited) {
+            Write-Host "退出较慢，重试一次 /api/quit …"
+            try { Invoke-WebRequest "http://127.0.0.1:8898/api/quit" -Method Post -UseBasicParsing -TimeoutSec 5 | Out-Null } catch {}
+            foreach ($i in 1..15) { if ($proc.HasExited) { break }; Start-Sleep -Seconds 1 }
+          }
           if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force; throw "未能干净退出" }
           Write-Host "✅ 干净退出"
 
