@@ -2185,6 +2185,8 @@ UPDATE_AUTO_INTERVAL = int(os.environ.get("RTM_UPDATE_INTERVAL") or 30 * 60)
 UPDATE_CACHE_TTL = int(os.environ.get("RTM_UPDATE_TTL") or 2 * 3600)
 # 更新检查地址（RTM_UPDATE_API 可指向镜像）
 UPDATE_API = os.environ.get("RTM_UPDATE_API") or "https://api.github.com/repos/wuxinxin27/reverse-tunnel-manager/releases/latest"
+# releases.atom 兜底源：不受 GitHub API 每 IP 60 次/小时的限流（RTM_UPDATE_ATOM 可指向镜像）
+UPDATE_ATOM = os.environ.get("RTM_UPDATE_ATOM") or "https://github.com/wuxinxin27/reverse-tunnel-manager/releases.atom"
 # 允许的安装包地址前缀（默认官方仓库；RTM_UPDATE_TRUST_PREFIX 逗号分隔可追加镜像前缀，主要用于内部镜像/测试）
 UPDATE_TRUST_PREFIXES = ("https://github.com/wuxinxin27/reverse-tunnel-manager/",) + tuple(
     p.strip() for p in (os.environ.get("RTM_UPDATE_TRUST_PREFIX") or "").split(",") if p.strip()
@@ -2215,8 +2217,76 @@ def _version_tuple(v: str) -> tuple:
         return (0,)
 
 
+def _construct_assets(version: str) -> list[dict]:
+    """按本仓库固定的发布产物命名构造下载地址（atom 兜底时使用，无需 API）。"""
+    base = "https://github.com/wuxinxin27/reverse-tunnel-manager/releases/download/v" + version + "/"
+    names = (
+        f"ReverseTunnelManager-{version}-setup.exe",
+        f"ReverseTunnelManager-{version}-macOS.dmg",
+        f"reverse-tunnel-manager_{version}_all.deb",
+        f"reverse-tunnel-manager_{version}.tar.gz",
+    )
+    return [{"name": n, "url": base + n, "size": 0} for n in names]
+
+
+def _check_update_via_atom() -> dict | None:
+    """经 releases.atom 检查最新版本（不受 GitHub API 限流）；失败返回 None。
+
+    API 被 403 限流（企业共享出口 IP 常见）时用这个兜底：atom 走的是
+    github.com 网页基础设施，没有 60 次/小时的限制；安装包地址按固定
+    命名规则构造（产物命名由本仓库 CI 控制）。
+    """
+    try:
+        req = urllib.request.Request(UPDATE_ATOM, headers={
+            "User-Agent": "reverse-tunnel-manager",
+            "Accept": "application/atom+xml",
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            text = r.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    m = re.search(r"<entry>(.*?)</entry>", text, re.S)
+    if not m:
+        return None
+    entry = m.group(1)
+    href = ""
+    lm = re.search(r'<link[^>]*href="([^"]+)"', entry)
+    if lm:
+        href = lm.group(1)
+    tag = href.rsplit("/", 1)[-1] if href else ""
+    if not tag:
+        im = re.search(r"<id>[^<]*/([^/<\s]+)</id>", entry)
+        tag = im.group(1) if im else ""
+    if not tag:
+        tm = re.search(r"<title>([^<]+)</title>", entry)
+        tag = tm.group(1).strip() if tm else ""
+    latest = tag.lstrip("v").strip()
+    if not re.match(r"^\d+(\.\d+)*$", latest):
+        return None
+    assets = _construct_assets(latest)
+    want_ext = ".exe" if os.name == "nt" else (".dmg" if sys.platform == "darwin" else ".deb")
+    asset_url = next((x["url"] for x in assets if x["name"].lower().endswith(want_ext)), "")
+    portable_url = next((x["url"] for x in assets if x["name"].lower().endswith(".tar.gz")), "")
+    return {
+        "checked_at": time.time(),
+        "current": VERSION,
+        "latest": latest,
+        "has_update": _version_tuple(latest) > _version_tuple(VERSION),
+        "url": f"https://github.com/wuxinxin27/reverse-tunnel-manager/releases/tag/v{latest}",
+        "asset_url": asset_url,
+        "portable_url": portable_url,
+        "assets": assets,
+        "error": "",
+        "via": "atom",
+    }
+
+
 def check_update(force: bool = False) -> dict:
-    """检查 GitHub 最新 Release；结果缓存 UPDATE_CACHE_TTL，网络失败时退回缓存。"""
+    """检查 GitHub 最新 Release；结果缓存 UPDATE_CACHE_TTL，网络失败时退回缓存。
+
+    API 被限流（企业共享出口 IP 常见 403 rate limit）时自动改用 releases.atom
+    兜底（无 API 限流）。
+    """
     now = time.time()
     cached = None
     try:
@@ -2260,12 +2330,17 @@ def check_update(force: bool = False) -> dict:
             "error": "",
         }
     except Exception as e:
-        if cached:
-            cached = dict(cached)
-            cached["error"] = f"检查失败：{e}"
-            return cached
-        return {"checked_at": now, "current": VERSION, "latest": "",
-                "has_update": False, "url": "", "asset_url": "", "error": str(e)}
+        # API 失败（常见：共享出口 IP 触发 403 限流）→ 用 releases.atom 兜底
+        info = _check_update_via_atom()
+        if info is None:
+            if cached:
+                cached = dict(cached)
+                cached["error"] = f"检查失败：{e}"
+                return cached
+            return {"checked_at": now, "current": VERSION, "latest": "",
+                    "has_update": False, "url": "", "asset_url": "", "assets": [],
+                    "error": str(e)}
+        info["checked_at"] = now
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         tmp = UPDATE_CACHE_FILE.with_suffix(".json.tmp")
