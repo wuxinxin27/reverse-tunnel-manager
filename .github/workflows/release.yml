@@ -127,6 +127,16 @@ jobs:
           if (-not $ok) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "目录版启动后 API 未响应（DLL 加载失败？）" }
           $state = ($r.Content | ConvertFrom-Json)
           Write-Host "✅ 目录版运行正常：version=$($state.version)"
+          Write-Host "等待托盘健康检查（含重试窗口，最多 ~65 秒）…"
+          Start-Sleep -Seconds 62
+          $state2 = (Invoke-WebRequest "http://127.0.0.1:8899/api/state" -UseBasicParsing -TimeoutSec 5).Content | ConvertFrom-Json
+          if ($state2.tray -ne $true) {
+            $plog = "$env:RUNNER_TEMP\rtm-smoke-a-d\logs\desktop.log"
+            if (Test-Path $plog) { Write-Host "---- desktop.log ----"; Get-Content $plog | Select-Object -Last 40 }
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw "背景模式托盘未确认显示（state.tray=$($state2.tray)）"
+          }
+          Write-Host "✅ 背景模式托盘图标已确认真实显示（state.tray=true）"
           Invoke-WebRequest "http://127.0.0.1:8899/api/quit" -Method Post -UseBasicParsing -TimeoutSec 5 | Out-Null
           foreach ($i in 1..15) { if ($proc.HasExited) { break }; Start-Sleep -Seconds 1 }
           if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force; throw "未能干净退出" }
@@ -172,6 +182,41 @@ jobs:
           foreach ($i in 1..15) { if ($proc.HasExited) { break }; Start-Sleep -Seconds 1 }
           if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force; throw "未能干净退出" }
           Write-Host "✅ 干净退出"
+
+      - name: 冒烟测试 D：窗口模式（WebView2 窗口 + 托盘真实可用性 + API 退出）
+        shell: pwsh
+        run: |
+          $env:RTM_CONFIG_DIR = "$env:RUNNER_TEMP\rtm-smoke-d-c"
+          $env:RTM_DATA_DIR = "$env:RUNNER_TEMP\rtm-smoke-d-d"
+          $exe = "dist\ReverseTunnelManager\ReverseTunnelManager.exe"
+          $proc = Start-Process -FilePath $exe -ArgumentList "--port","8894" -PassThru
+          $ok = $false
+          foreach ($i in 1..40) {
+            Start-Sleep -Seconds 1
+            try { $r = Invoke-WebRequest "http://127.0.0.1:8894/api/state" -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { $ok = $true; break } } catch {}
+          }
+          if (-not $ok) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "窗口模式启动后 API 未响应" }
+          Write-Host "✅ 窗口模式启动成功，等待托盘确认（含重试窗口，最多 ~65 秒）…"
+          Start-Sleep -Seconds 62
+          $state = (Invoke-WebRequest "http://127.0.0.1:8894/api/state" -UseBasicParsing -TimeoutSec 5).Content | ConvertFrom-Json
+          $plog = "$env:RUNNER_TEMP\rtm-smoke-d-d\logs\desktop.log"
+          if ($state.tray -ne $true) {
+            $log = if (Test-Path $plog) { Get-Content $plog -Raw } else { "" }
+            if ($log -match "WebView2 窗口启动失败") {
+              Write-Host "⚠️ WebView2 不可用已回退（该模式下无托盘属预期），跳过托盘断言"
+            } else {
+              Write-Host "---- desktop.log（尾部）----"
+              if ($log.Length -gt 2000) { Write-Host $log.Substring($log.Length - 2000) } else { Write-Host $log }
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              throw "窗口模式托盘未确认显示（state.tray=$($state.tray)）"
+            }
+          } else {
+            Write-Host "✅ 窗口模式托盘图标已确认真实显示（state.tray=true）"
+          }
+          Invoke-WebRequest "http://127.0.0.1:8894/api/quit" -Method Post -UseBasicParsing -TimeoutSec 5 | Out-Null
+          foreach ($i in 1..20) { if ($proc.HasExited) { break }; Start-Sleep -Seconds 1 }
+          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force; throw "窗口模式未能通过 API 干净退出" }
+          Write-Host "✅ 窗口模式干净退出"
 
       - name: 冒烟测试 C：应用内自动更新全流程（模拟 API 提供安装包 → 下载 → 静默安装 → 自动重启）
         shell: pwsh

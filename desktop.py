@@ -260,6 +260,66 @@ def _start_tray_title_loop(icon, manager) -> None:
     threading.Thread(target=loop, daemon=True).start()
 
 
+def _tray_probe(icon) -> bool:
+    """独立验证托盘图标是否真的注册进系统托盘。
+
+    pystray 不检查 Shell_NotifyIcon 的返回值，静默失败时程序会误以为托盘可用；
+    这里用 NIM_MODIFY 探测——只有真正注册过的图标才能被修改。
+    """
+    try:
+        import ctypes
+        from pystray._util import win32 as w32
+        hwnd = getattr(icon, "_hwnd", None)
+        if not hwnd:
+            return False
+        nid = w32.NOTIFYICONDATAW(
+            cbSize=ctypes.sizeof(w32.NOTIFYICONDATAW),
+            hWnd=hwnd,
+            uID=0,  # pystray 传入的 hID 关键字会被 ctypes 忽略，实际注册 uID=0
+            uFlags=w32.NIF_MESSAGE | w32.NIF_ICON | w32.NIF_TIP,
+            uCallbackMessage=w32.WM_NOTIFY,
+            hIcon=getattr(icon, "_icon_handle", None) or 0,
+            szTip=(icon.title or "")[:127],
+        )
+        return bool(w32.Shell_NotifyIcon(w32.NIM_MODIFY, nid))
+    except Exception:
+        traceback.print_exc()
+        return True  # 无法验证时不误伤
+
+
+def _tray_health_watch(icon, manager) -> None:
+    """启动后验证托盘图标真实可见；失败时尝试重新注册（如登录过早/Explorer 未就绪）。
+
+    最终仍不可用时把 manager.tray_available 置为 False——窗口关闭时就不会再
+    “藏起来却找不到入口”，而是弹出确认框，避免用户被困住。
+    """
+    def watch():
+        delays = (4.0, 6.0, 15.0, 30.0)
+        for i, d in enumerate(delays):
+            time.sleep(d)
+            try:
+                if getattr(icon, "visible", False) and _tray_probe(icon):
+                    if i > 0:
+                        print(f"[tray] 托盘图标在第 {i + 1} 次检查时确认显示")
+                    else:
+                        print("[tray] 托盘图标已确认显示")
+                    manager.tray_available = True
+                    return
+                # 立即保护：先标记不可用（关闭窗口将不再隐藏），再尝试重新注册
+                manager.tray_available = False
+                print(f"[tray] 第 {i + 1} 次检查：图标未显示，尝试重新注册…")
+                try:
+                    icon.visible = False
+                    icon.visible = True
+                except Exception:
+                    traceback.print_exc()
+            except Exception:
+                traceback.print_exc()
+        print("[tray] 托盘图标始终未能显示：保持“系统托盘不可用”状态")
+        manager.tray_available = False
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def _create_tray_win32(window, manager, quit_cb):
     """Windows 系统托盘（pystray；打包版已内置）。不可用时返回 None。"""
     pystray, image = _load_tray_deps()
@@ -332,6 +392,7 @@ def _create_tray_win32(window, manager, quit_cb):
 
     threading.Thread(target=_run_icon, daemon=True).start()
     _start_tray_title_loop(icon, manager)
+    _tray_health_watch(icon, manager)
     return icon
 
 
@@ -419,6 +480,7 @@ def _run_background_win32(manager, httpd) -> int | None:
     threading.Thread(target=_run_icon, daemon=True).start()
     _start_tray_title_loop(icon, manager)
     manager.tray_available = True
+    _tray_health_watch(icon, manager)
     httpd.RequestHandlerClass.shutdown_cb = functools.partial(quit_all)
     for sig_name in ("SIGINT", "SIGTERM"):
         try:
@@ -861,7 +923,9 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
             state["tray_hint_shown"] = True
             try:
                 tray_icon.notify(
-                    "已收缩到右下角状态栏，隧道继续在后台运行。双击/右键托盘图标可重新打开。",
+                    "已收缩到系统托盘，隧道继续在后台运行。\n"
+                    "若看不到图标：点击任务栏右下角「^」展开隐藏图标。\n"
+                    "应急打开界面：浏览器访问 " + url,
                     "反向隧道管理器")
             except Exception:
                 traceback.print_exc()
@@ -869,7 +933,8 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
         def on_closing():
             if state["quitting"] or not owns:
                 return True
-            if tray_icon is not None:
+            # 托盘真实可用才隐藏窗口；否则先确认再退出，避免“消失且找不到入口”
+            if tray_icon is not None and manager.tray_available is not False:
                 if _hide_window():
                     _show_tray_hint()
                     return False  # 取消关闭，隐藏到托盘
@@ -882,7 +947,8 @@ def run_webview_window(url, owns, manager, httpd, core) -> int | None:
 
         def on_minimized(*_):
             """点最小化按钮 → 收缩到托盘"""
-            if state["quitting"] or not owns or tray_icon is None:
+            if (state["quitting"] or not owns or tray_icon is None
+                    or manager.tray_available is False):
                 return
             if _hide_window():
                 _show_tray_hint()
