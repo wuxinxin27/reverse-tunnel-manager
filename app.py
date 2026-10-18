@@ -1331,25 +1331,48 @@ class Manager:
 
     # -- 各平台安装 --
 
+    @staticmethod
+    def _win_arg_quote(a: str) -> str:
+        """按 Windows 命令行规则给单个参数加引号。"""
+        if a == "" or any(c in a for c in " \t\""):
+            a = '"' + a.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return a
+
     def _windows_update_script(self, installer: Path, target: Path) -> str:
-        """生成隐藏的 PowerShell 更新脚本内容（等待退出 → 静默安装 → 按原参数启动新版）。"""
+        """生成隐藏的 PowerShell 更新脚本（等待退出 → 静默安装 → 按原参数启动新版）。
+
+        全程写日志到 update 目录的 apply_update.log，便于远程排查失败原因。
+        """
         extra = [str(a) for a in sys.argv[1:]]
         argline = ""
+        arg_for_log = ""
         if extra:
-            quoted = " ".join("'" + a.replace("'", "''") + "'" for a in extra)
-            argline = " -ArgumentList " + quoted
+            joined = " ".join(self._win_arg_quote(a) for a in extra)
+            argline = " -ArgumentList '" + joined.replace("'", "''") + "'"
+            arg_for_log = joined.replace("'", "''")
+        safe_log = str(installer.parent / "apply_update.log").replace("'", "''")
+        safe_installer = str(installer)
+        safe_target = str(target)
         return (
+            "$logFile = '" + safe_log + "'\n"
+            "function Log($m) { try { Add-Content -Path $logFile -Value ((Get-Date -Format o) + ' ' + $m) } catch {} }\n"
+            "Log '开始：等待旧进程退出 (pid=" + str(os.getpid()) + ")'\n"
             "$oldPid = " + str(os.getpid()) + "\n"
             "$deadline = (Get-Date).AddSeconds(180)\n"
             "while ((Get-Date) -lt $deadline) {\n"
             "    if (-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) { break }\n"
             "    Start-Sleep -Milliseconds 300\n"
             "}\n"
+            "Log '旧进程已退出，开始静默安装'\n"
             "Start-Sleep -Milliseconds 500\n"
-            'Start-Process -FilePath "' + str(installer) + '" '
-            "-ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES','/FORCECLOSEAPPLICATIONS' -Wait\n"
+            "$ip = Start-Process -FilePath \"" + safe_installer + "\" "
+            "-ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES','/FORCECLOSEAPPLICATIONS' -Wait -PassThru\n"
+            "Log ('安装结束 exit=' + $ip.ExitCode)\n"
             "Start-Sleep -Milliseconds 800\n"
-            'Start-Process -FilePath "' + str(target) + '"' + argline + "\n"
+            "if (-not (Test-Path \"" + safe_target + "\")) { Log '警告：目标 exe 不存在' }\n"
+            "Log '启动新版本 参数=[" + arg_for_log + "]'\n"
+            "try { Start-Process -FilePath \"" + safe_target + "\"" + argline + "; Log '已启动新版本' }\n"
+            "catch { Log ('启动失败: ' + $_) }\n"
         )
 
     def _apply_windows(self, installer: Path) -> None:
