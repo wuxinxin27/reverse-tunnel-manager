@@ -49,7 +49,7 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 ICON_FILE = APP_DIR / "assets" / "icon.svg"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 
 def _base_dir(kind: str) -> Path:
@@ -291,10 +291,18 @@ def save_config(cfg: dict) -> None:
 
 # ---------------------------------------------------------------- SSH 命令构建
 
+def _no_window_run_kwargs() -> dict:
+    """Windows 下让一次性子进程（如 ssh -G 解析别名）不弹出黑色控制台窗口。"""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def resolve_alias(alias: str) -> dict:
     """通过 `ssh -G 别名` 解析出最终连接参数（不发起真实连接）"""
     try:
-        proc = subprocess.run(["ssh", "-G", alias], capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(["ssh", "-G", alias], capture_output=True, text=True, timeout=15,
+                              **_no_window_run_kwargs())
     except FileNotFoundError:
         raise RuntimeError("系统中找不到 ssh 命令")
     except subprocess.TimeoutExpired:
@@ -427,7 +435,8 @@ def probe_tunnel(tunnel: dict, extra_args: list[str]) -> dict:
         return {"ok": False, "error": str(e), "output": ""}
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45,
+                              **_no_window_run_kwargs())
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "测试超时（45 秒）", "output": ""}
 
@@ -902,6 +911,14 @@ class Manager:
         for t in self.config["tunnels"]:
             self.runtimes[t["id"]] = TunnelRuntime(t, self)
         save_config(self.config)
+        # Windows：旧版 .cmd 自启会闪黑窗，启动时自动迁移为无窗口的 .vbs
+        if os.name == "nt":
+            try:
+                legacy = _windows_legacy_startup_file()
+                if legacy and legacy.exists():
+                    set_autostart(True)
+            except Exception:
+                pass
         self.notifier = None          # 桌面层可覆盖（Windows 托盘通知等）
         self.update_info: dict | None = None
         threading.Thread(target=self._background_loop, daemon=True).start()
@@ -1203,6 +1220,14 @@ def _windows_startup_file() -> Path | None:
     appdata = os.environ.get("APPDATA")
     if not appdata:
         return None
+    # 用 VBScript 无窗口方式启动，避免登录时闪黑色控制台窗口
+    return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "ReverseTunnelManager.vbs"
+
+
+def _windows_legacy_startup_file() -> Path | None:
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return None
     return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "ReverseTunnelManager.cmd"
 
 
@@ -1212,7 +1237,23 @@ def autostart_file() -> Path | None:
 
 def autostart_enabled() -> bool:
     f = autostart_file()
-    return bool(f and f.exists())
+    if f and f.exists():
+        return True
+    if os.name == "nt":
+        legacy = _windows_legacy_startup_file()
+        return bool(legacy and legacy.exists())
+    return False
+
+
+def _windows_autostart_content() -> str:
+    """生成无窗口启动的 VBScript（避免登录时闪黑色控制台窗口）"""
+    if getattr(sys, "frozen", False):
+        runline = f'"""{Path(sys.executable)}"" --background"'
+    else:
+        pyw = Path(sys.executable).with_name("pythonw.exe")
+        runner = pyw if pyw.exists() else Path(sys.executable)
+        runline = f'"""{runner}"" ""{APP_DIR / "desktop.py"}"" --background"'
+    return 'Set ws = CreateObject("WScript.Shell")\r\n' + f'ws.Run {runline}, 0, False\r\n'
 
 
 def set_autostart(enabled: bool) -> bool:
@@ -1222,13 +1263,14 @@ def set_autostart(enabled: bool) -> bool:
     if enabled:
         f.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
-            if getattr(sys, "frozen", False):
-                cmd = f'start "" "{Path(sys.executable)}" --background\r\n'
-            else:
-                pyw = Path(sys.executable).with_name("pythonw.exe")
-                runner = pyw if pyw.exists() else Path(sys.executable)
-                cmd = f'start "" "{runner}" "{APP_DIR / "desktop.py"}" --background\r\n'
-            f.write_text("@echo off\r\n" + cmd, encoding="utf-8")
+            f.write_text(_windows_autostart_content(), encoding="utf-8")
+            # 清理旧版 .cmd 自启文件（会闪窗）
+            legacy = _windows_legacy_startup_file()
+            if legacy:
+                try:
+                    legacy.unlink()
+                except FileNotFoundError:
+                    pass
         else:
             desktop_py = APP_DIR / "desktop.py"
             app_py = APP_DIR / "app.py"
@@ -1245,10 +1287,16 @@ def set_autostart(enabled: bool) -> bool:
                 encoding="utf-8",
             )
     else:
-        try:
-            f.unlink()
-        except FileNotFoundError:
-            pass
+        candidates = [f]
+        if os.name == "nt":
+            legacy = _windows_legacy_startup_file()
+            if legacy:
+                candidates.append(legacy)
+        for path in candidates:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
     return autostart_enabled()
 
 
