@@ -116,6 +116,10 @@ jobs:
         run: |
           $env:RTM_CONFIG_DIR = "$env:RUNNER_TEMP\rtm-smoke-a-c"
           $env:RTM_DATA_DIR = "$env:RUNNER_TEMP\rtm-smoke-a-d"
+          # 预置一条隧道：托盘菜单必须能构建"隧道开关"项（回归：pystray 动作只允许 0~2 参数）
+          New-Item -ItemType Directory -Force -Path $env:RTM_CONFIG_DIR | Out-Null
+          $cfg = '{"settings":{},"tunnels":[{"id":"cismoke","name":"CI冒烟隧道","mode":"custom","host":"127.0.0.1","port":22,"user":"root","rules":[{"remote_port":17999,"local_target":"127.0.0.1:7890"}],"enabled":false}]}'
+          Set-Content -Path "$env:RTM_CONFIG_DIR\config.json" -Value $cfg -Encoding utf8
           $exe = "dist\ReverseTunnelManager\ReverseTunnelManager.exe"
           if (-not (Test-Path "dist\ReverseTunnelManager\_internal\python312.dll")) { throw "目录版缺少 _internal\python312.dll" }
           $proc = Start-Process -FilePath $exe -ArgumentList "--background","--port","8899" -PassThru
@@ -188,6 +192,10 @@ jobs:
         run: |
           $env:RTM_CONFIG_DIR = "$env:RUNNER_TEMP\rtm-smoke-d-c"
           $env:RTM_DATA_DIR = "$env:RUNNER_TEMP\rtm-smoke-d-d"
+          # 预置一条隧道：窗口模式托盘菜单同样要能构建（回归：pystray 动作只允许 0~2 参数）
+          New-Item -ItemType Directory -Force -Path $env:RTM_CONFIG_DIR | Out-Null
+          $cfg = '{"settings":{},"tunnels":[{"id":"cismoke","name":"CI冒烟隧道","mode":"custom","host":"127.0.0.1","port":22,"user":"root","rules":[{"remote_port":17999,"local_target":"127.0.0.1:7890"}],"enabled":false}]}'
+          Set-Content -Path "$env:RTM_CONFIG_DIR\config.json" -Value $cfg -Encoding utf8
           $exe = "dist\ReverseTunnelManager\ReverseTunnelManager.exe"
           $proc = Start-Process -FilePath $exe -ArgumentList "--port","8894" -PassThru
           $ok = $false

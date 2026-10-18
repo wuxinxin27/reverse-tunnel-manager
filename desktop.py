@@ -350,12 +350,10 @@ def _create_tray_win32(window, manager, quit_cb):
             snaps = manager.state()["tunnels"]
         except Exception:
             snaps = []
-        for snap in snaps:
-            running = snap["state"] == "running"
-            label = ("● " if running else "○ ") + str(snap.get("name") or "")
-            tid = snap["id"]
-
-            def _toggle(icon, item, _tid=tid, _run=running):
+        def _make_toggle(_tid, _run):
+            """pystray 菜单动作仅允许 0~2 个参数（pystray._base._assert_action 会拒绝 3+），
+            因此用工厂闭包提供恰好 (icon, item) 形态的调用。"""
+            def _toggle(icon, item):
                 try:
                     if _run:
                         manager.stop(_tid)
@@ -363,8 +361,12 @@ def _create_tray_win32(window, manager, quit_cb):
                         manager.start(_tid)
                 except Exception:
                     pass
+            return _toggle
 
-            items.append(pystray.MenuItem(label, _toggle))
+        for snap in snaps:
+            running = snap["state"] == "running"
+            label = ("● " if running else "○ ") + str(snap.get("name") or "")
+            items.append(pystray.MenuItem(label, _make_toggle(snap["id"], running)))
         if items:
             items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem(L["show"], on_show, default=True))
@@ -412,6 +414,12 @@ def _create_tray_win32_headless(manager, quit_cb):
         except Exception:
             traceback.print_exc()
 
+    def _make_item_action(tid, running):
+        """2 参数形态的菜单动作（pystray 动作契约：0~2 个参数，3+ 会 ValueError）"""
+        def action(icon, item):
+            _toggle(icon, item, tid, running)
+        return action
+
     def build_menu(*_args):
         items = []
         try:
@@ -421,10 +429,7 @@ def _create_tray_win32_headless(manager, quit_cb):
         for snap in snaps:
             running = snap["state"] == "running"
             label = ("● " if running else "○ ") + str(snap.get("name") or "")
-            items.append(pystray.MenuItem(
-                label,
-                lambda icon, item, _t=snap["id"], _r=running: _toggle(icon, item, _t, _r),
-            ))
+            items.append(pystray.MenuItem(label, _make_item_action(snap["id"], running)))
         if items:
             items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem(L["show"], lambda icon, item: _spawn_ui(), default=True))
