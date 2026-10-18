@@ -37,7 +37,7 @@
 从 [Releases](https://github.com/wuxinxin27/reverse-tunnel-manager/releases) 下载 `.deb` 安装包：
 
 ```bash
-sudo apt install ./reverse-tunnel-manager_1.1.5_all.deb
+sudo apt install ./reverse-tunnel-manager_1.1.6_all.deb
 ```
 
 然后在应用菜单里打开「反向隧道管理器」。（也提供免安装的 `.tar.gz`）
@@ -47,7 +47,7 @@ sudo apt install ./reverse-tunnel-manager_1.1.5_all.deb
 ### Windows 10/11
 
 从 [Releases](https://github.com/wuxinxin27/reverse-tunnel-manager/releases) 下载
-`ReverseTunnelManager-1.1.5-setup.exe` 双击安装，可选桌面图标与开机自启。
+`ReverseTunnelManager-1.1.6-setup.exe` 双击安装，可选桌面图标与开机自启。
 界面是独立原生窗口（使用系统自带的 WebView2/Edge 运行时）；若系统缺少 WebView2（极少见），会自动退化为 Edge/Chrome 应用窗口。
 
 > 需要 `ssh.exe`：Windows 10 1809+ 默认包含；如缺失，在「设置 → 应用 → 可选功能」安装 OpenSSH 客户端。

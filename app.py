@@ -51,7 +51,7 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 ICON_FILE = APP_DIR / "assets" / "icon.svg"
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 
 
 def _base_dir(kind: str) -> Path:
