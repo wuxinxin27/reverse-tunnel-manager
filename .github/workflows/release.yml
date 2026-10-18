@@ -146,6 +146,12 @@ jobs:
           if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force; throw "未能干净退出" }
           Write-Host "✅ 干净退出"
 
+      - name: 诊断实验：Windows 进程 I/O 计数是否包含套接字流量（流量统计用）
+        shell: pwsh
+        run: |
+          python packaging/smoke/io_probe.py 2>&1
+
+
       - name: 冒烟测试 B：先装 v1.1.4 旧版并运行 → 覆盖安装新版（强制关闭旧进程）→ 运行
         shell: pwsh
         run: |

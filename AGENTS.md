@@ -16,7 +16,7 @@
 | `pywebview` | 窗口库（BSD） | 窗口隐藏/恢复、事件（closing/minimized）、多窗口 |
 | `pyinstaller` | 打包器（GPL） | onefile/onedir、资源打包、`sys._MEIPASS`、启动失败 |
 | `autossh` | SSH 隧道守护（无许可证声明） | 重连策略、保活、监控端口 |
-| 本项目（`rtm-` 前缀） | 自身源码 | 用 `xerj search "<词>"` / `xerj def "<符号>"` 定位 |
+| 本项目 | 自身源码（默认 `ax-*` 前缀） | 用 `xerj search "<词>"` / `xerj def "<符号>"` 定位 |
 
 ### 命令
 
@@ -24,8 +24,8 @@
 xerj code pystray "menu item action requires two arguments"
 xerj code pyinstaller "onedir vs onefile extraction sys._MEIPASS"
 xerj code autossh "reconnect strategy keepalive"
-xerj def "build_menu"          # 本项目符号定位（file:line + 签名）
-xerj search "Shell_NotifyIcon retry"   # 全部索引的通用检索
+xerj def "build_menu"                  # 本项目符号定位（file:line + 签名）
+xerj search "Shell_NotifyIcon retry"   # 本项目代码语义检索
 ```
 
 MCP 工具（OpenCode 会话重启后生效）：`xerj_code_search`（{corpus, query}）、`xerj_search`、`xerj_def`。
