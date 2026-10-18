@@ -1332,7 +1332,12 @@ class Manager:
     # -- 各平台安装 --
 
     def _windows_update_script(self, installer: Path, target: Path) -> str:
-        """生成隐藏的 PowerShell 更新脚本内容（等待退出 → 静默安装 → 启动新版）。"""
+        """生成隐藏的 PowerShell 更新脚本内容（等待退出 → 静默安装 → 按原参数启动新版）。"""
+        extra = [str(a) for a in sys.argv[1:]]
+        argline = ""
+        if extra:
+            quoted = " ".join("'" + a.replace("'", "''") + "'" for a in extra)
+            argline = " -ArgumentList " + quoted
         return (
             "$oldPid = " + str(os.getpid()) + "\n"
             "$deadline = (Get-Date).AddSeconds(180)\n"
@@ -1344,7 +1349,7 @@ class Manager:
             'Start-Process -FilePath "' + str(installer) + '" '
             "-ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES','/FORCECLOSEAPPLICATIONS' -Wait\n"
             "Start-Sleep -Milliseconds 800\n"
-            'Start-Process -FilePath "' + str(target) + '"\n'
+            'Start-Process -FilePath "' + str(target) + '"' + argline + "\n"
         )
 
     def _apply_windows(self, installer: Path) -> None:
