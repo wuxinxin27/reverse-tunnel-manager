@@ -38,6 +38,30 @@ jobs:
             dist/*.deb
             dist/*.tar.gz
 
+      - name: 冒烟测试：解包运行 .tar.gz（后台模式 → API 可用 → 干净退出）
+        run: |
+          mkdir -p /tmp/smoke && tar -xzf dist/*.tar.gz -C /tmp/smoke
+          APP_DIR="$(find /tmp/smoke -maxdepth 1 -mindepth 1 -type d | head -1)"
+          rm -rf /tmp/rtm-smoke-c /tmp/rtm-smoke-d
+          RTM_CONFIG_DIR=/tmp/rtm-smoke-c RTM_DATA_DIR=/tmp/rtm-smoke-d \
+            python3 "$APP_DIR/desktop.py" --background --port 8896 &
+          APP_PID=$!
+          ok=0
+          for i in $(seq 1 40); do
+            sleep 1
+            if curl -sf -m 3 http://127.0.0.1:8896/api/state >/dev/null; then ok=1; break; fi
+          done
+          if [ "$ok" != "1" ]; then
+            kill -9 $APP_PID 2>/dev/null
+            echo "::error::tar.gz 解包后启动失败（API 无响应）"
+            exit 1
+          fi
+          echo "✅ tar.gz 运行正常"
+          curl -sf -m 5 -X POST http://127.0.0.1:8896/api/quit >/dev/null
+          for i in $(seq 1 15); do sleep 1; kill -0 $APP_PID 2>/dev/null || break; done
+          if kill -0 $APP_PID 2>/dev/null; then kill -9 $APP_PID; echo "::error::未能干净退出"; exit 1; fi
+          echo "✅ 干净退出"
+
   build-windows:
     name: Windows 安装包
     runs-on: windows-latest
@@ -87,6 +111,97 @@ jobs:
           name: windows-onedir
           path: dist/ReverseTunnelManager/
 
+      - name: 冒烟测试 A：直接运行目录版（验证 DLL 从安装目录加载 + API + 干净退出）
+        shell: pwsh
+        run: |
+          $env:RTM_CONFIG_DIR = "$env:RUNNER_TEMP\rtm-smoke-a-c"
+          $env:RTM_DATA_DIR = "$env:RUNNER_TEMP\rtm-smoke-a-d"
+          $exe = "dist\ReverseTunnelManager\ReverseTunnelManager.exe"
+          if (-not (Test-Path "dist\ReverseTunnelManager\_internal\python312.dll")) { throw "目录版缺少 _internal\python312.dll" }
+          $proc = Start-Process -FilePath $exe -ArgumentList "--background","--port","8899" -PassThru
+          $ok = $false
+          foreach ($i in 1..40) {
+            Start-Sleep -Seconds 1
+            try { $r = Invoke-WebRequest "http://127.0.0.1:8899/api/state" -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { $ok = $true; break } } catch {}
+          }
+          if (-not $ok) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "目录版启动后 API 未响应（DLL 加载失败？）" }
+          $state = ($r.Content | ConvertFrom-Json)
+          Write-Host "✅ 目录版运行正常：version=$($state.version)"
+          Invoke-WebRequest "http://127.0.0.1:8899/api/quit" -Method Post -UseBasicParsing -TimeoutSec 5 | Out-Null
+          foreach ($i in 1..15) { if ($proc.HasExited) { break }; Start-Sleep -Seconds 1 }
+          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force; throw "未能干净退出" }
+          Write-Host "✅ 干净退出"
+
+      - name: 冒烟测试 B：先装 v1.1.4 旧版并运行 → 覆盖安装新版（强制关闭旧进程）→ 运行
+        shell: pwsh
+        run: |
+          # 1) 安装旧版（v1.1.4，单文件版）——模拟用户当前状态
+          $old = "$env:RUNNER_TEMP\old-setup.exe"
+          Invoke-WebRequest "https://github.com/wuxinxin27/reverse-tunnel-manager/releases/download/v1.1.4/ReverseTunnelManager-1.1.4-setup.exe" -OutFile $old
+          Start-Process -FilePath $old -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES" -Wait
+          $app = "$env:LOCALAPPDATA\Programs\ReverseTunnelManager\ReverseTunnelManager.exe"
+          if (-not (Test-Path $app)) { throw "旧版安装后未找到 exe" }
+          # 2) 启动旧版后台实例（模拟升级时后台实例正在运行）
+          $env:RTM_CONFIG_DIR = "$env:RUNNER_TEMP\rtm-smoke-b-c"
+          $env:RTM_DATA_DIR = "$env:RUNNER_TEMP\rtm-smoke-b-d"
+          $oldProc = Start-Process -FilePath $app -ArgumentList "--background","--port","8895" -PassThru
+          $ok = $false
+          foreach ($i in 1..40) {
+            Start-Sleep -Seconds 1
+            try { $r = Invoke-WebRequest "http://127.0.0.1:8895/api/state" -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { $ok = $true; break } } catch {}
+          }
+          if (-not $ok) { Stop-Process -Id $oldProc.Id -Force -ErrorAction SilentlyContinue; throw "旧版后台实例启动失败" }
+          Write-Host "✅ 旧版后台实例运行中"
+          # 3) 覆盖安装新版（带强制关闭，等价于自动更新脚本的安装方式）
+          $setup = (Get-ChildItem "dist\*setup.exe" | Select-Object -First 1).FullName
+          Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/FORCECLOSEAPPLICATIONS" -Wait
+          foreach ($i in 1..30) { if ($oldProc.HasExited) { break }; Start-Sleep -Seconds 1 }
+          if (-not $oldProc.HasExited) { Stop-Process -Id $oldProc.Id -Force; throw "升级安装未关闭旧的后台实例" }
+          Write-Host "✅ 升级安装成功，旧实例已关闭"
+          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\ReverseTunnelManager\_internal\python312.dll")) { throw "新版安装目录缺少 _internal\python312.dll" }
+          # 4) 运行升级后的新版
+          $proc = Start-Process -FilePath $app -ArgumentList "--background","--port","8898" -PassThru
+          $ok = $false
+          foreach ($i in 1..40) {
+            Start-Sleep -Seconds 1
+            try { $r = Invoke-WebRequest "http://127.0.0.1:8898/api/state" -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { $ok = $true; break } } catch {}
+          }
+          if (-not $ok) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "升级后的新版启动失败" }
+          Write-Host "✅ 升级后的新版运行正常"
+          Invoke-WebRequest "http://127.0.0.1:8898/api/quit" -Method Post -UseBasicParsing -TimeoutSec 5 | Out-Null
+          foreach ($i in 1..15) { if ($proc.HasExited) { break }; Start-Sleep -Seconds 1 }
+          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force; throw "未能干净退出" }
+          Write-Host "✅ 干净退出"
+
+      - name: 冒烟测试 C：应用内自动更新全流程（模拟 GitHub API → 下载 → 静默安装 → 自动重启）
+        shell: pwsh
+        run: |
+          $app = "$env:LOCALAPPDATA\Programs\ReverseTunnelManager\ReverseTunnelManager.exe"
+          $sizeBefore = (Get-Item $app).Length
+          $mock = Start-Process python -ArgumentList "packaging/smoke/mock_release_api.py","--port","8902","--tag","v9.9.9","--asset","https://github.com/wuxinxin27/reverse-tunnel-manager/releases/download/v1.1.4/ReverseTunnelManager-1.1.4-setup.exe" -PassThru
+          Start-Sleep -Seconds 2
+          $env:RTM_CONFIG_DIR = "$env:RUNNER_TEMP\rtm-smoke-c-c"
+          $env:RTM_DATA_DIR = "$env:RUNNER_TEMP\rtm-smoke-c-d"
+          $env:RTM_UPDATE_API = "http://127.0.0.1:8902/latest"
+          $proc = Start-Process -FilePath $app -ArgumentList "--background","--port","8895" -PassThru
+          Write-Host "等待自动更新流程（下载→安装→重启）…"
+          $ok = $false
+          $deadline = (Get-Date).AddSeconds(240)
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 3
+            if ($proc.HasExited) { Write-Host "旧进程已退出（进入安装/重启阶段）" }
+            try { $r = Invoke-WebRequest "http://127.0.0.1:8895/api/state" -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $proc.HasExited) { $ok = $true; break } } catch {}
+          }
+          if (-not $ok) { try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}; Stop-Process -Id $mock.Id -Force -ErrorAction SilentlyContinue; throw "自动更新流程未在 4 分钟内完成重启" }
+          Write-Host "✅ 自动更新完成，应用已自动重启并响应 API"
+          $sizeAfter = (Get-Item $app).Length
+          if ($sizeAfter -eq $sizeBefore) { Stop-Process -Id $mock.Id -Force -ErrorAction SilentlyContinue; throw "重启后的 exe 未被替换（安装未生效）" }
+          Write-Host "✅ exe 已被更新（$sizeBefore → $sizeAfter 字节）"
+          Invoke-WebRequest "http://127.0.0.1:8895/api/quit" -Method Post -UseBasicParsing -TimeoutSec 5 | Out-Null
+          Start-Sleep -Seconds 3
+          Stop-Process -Id $mock.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "✅ 自动更新全流程冒烟测试通过"
+
   build-macos:
     name: macOS 安装包（.dmg）
     runs-on: macos-14
@@ -133,6 +248,28 @@ jobs:
         with:
           name: macos-installer
           path: dist/*.dmg
+
+      - name: 冒烟测试：运行 .app（后台模式 → API 可用 → 干净退出）
+        run: |
+          rm -rf /tmp/rtm-smoke-c /tmp/rtm-smoke-d
+          RTM_CONFIG_DIR=/tmp/rtm-smoke-c RTM_DATA_DIR=/tmp/rtm-smoke-d \
+            "dist/ReverseTunnelManager.app/Contents/MacOS/ReverseTunnelManager" --background --port 8897 &
+          APP_PID=$!
+          ok=0
+          for i in $(seq 1 40); do
+            sleep 1
+            if curl -sf -m 3 http://127.0.0.1:8897/api/state >/dev/null; then ok=1; break; fi
+          done
+          if [ "$ok" != "1" ]; then
+            kill -9 $APP_PID 2>/dev/null
+            echo "::error::macOS 应用启动后 API 未响应"
+            exit 1
+          fi
+          echo "✅ macOS .app 运行正常"
+          curl -sf -m 5 -X POST http://127.0.0.1:8897/api/quit >/dev/null
+          for i in $(seq 1 15); do sleep 1; kill -0 $APP_PID 2>/dev/null || break; done
+          if kill -0 $APP_PID 2>/dev/null; then kill -9 $APP_PID; echo "::error::未能干净退出"; exit 1; fi
+          echo "✅ 干净退出"
 
   release:
     name: 发布 Release

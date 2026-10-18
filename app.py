@@ -1342,7 +1342,7 @@ class Manager:
             "}\n"
             "Start-Sleep -Milliseconds 500\n"
             'Start-Process -FilePath "' + str(installer) + '" '
-            "-ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES' -Wait\n"
+            "-ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES','/FORCECLOSEAPPLICATIONS' -Wait\n"
             "Start-Sleep -Milliseconds 800\n"
             'Start-Process -FilePath "' + str(target) + '"\n'
         )
